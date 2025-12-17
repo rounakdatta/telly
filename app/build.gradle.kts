@@ -7,11 +7,11 @@ plugins {
 }
 
 android {
-    namespace = "com.telly"
+    namespace = "club.taptappers.telly"
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.telly"
+        applicationId = "club.taptappers.telly"
         minSdk = 29
         targetSdk = 35
         versionCode = 1
@@ -72,6 +72,9 @@ dependencies {
     implementation(libs.androidx.work.runtime.ktx)
     implementation(libs.hilt.work)
     ksp(libs.hilt.work.compiler)
+
+    // OkHttp
+    implementation(libs.okhttp)
 
     // Debug
     debugImplementation(libs.androidx.ui.tooling)
