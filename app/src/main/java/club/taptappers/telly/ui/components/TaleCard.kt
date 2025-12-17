@@ -18,6 +18,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.unit.dp
+import club.taptappers.telly.data.model.ActionType
 import club.taptappers.telly.data.model.ScheduleType
 import club.taptappers.telly.data.model.Tale
 import club.taptappers.telly.ui.theme.Black
@@ -53,7 +54,7 @@ fun TaleCard(
                 color = Black
             )
             Text(
-                text = getScheduleDescription(tale),
+                text = "${getActionLabel(tale.actionType)} • ${getScheduleDescription(tale)}",
                 style = MaterialTheme.typography.bodySmall,
                 color = Gray500
             )
@@ -77,6 +78,13 @@ fun TaleCard(
                 uncheckedBorderColor = Gray200
             )
         )
+    }
+}
+
+private fun getActionLabel(actionType: ActionType): String {
+    return when (actionType) {
+        ActionType.TIME -> "Time"
+        ActionType.EMAIL_JUGGLE -> "Email"
     }
 }
 

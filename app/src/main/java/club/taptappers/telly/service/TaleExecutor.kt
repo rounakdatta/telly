@@ -1,19 +1,13 @@
-package club.taptappers.telly.worker
+package club.taptappers.telly.service
 
-import android.content.Context
 import android.os.Build
 import android.util.Log
-import androidx.hilt.work.HiltWorker
-import androidx.work.CoroutineWorker
-import androidx.work.WorkerParameters
 import club.taptappers.telly.data.model.ActionType
 import club.taptappers.telly.data.model.ScheduleType
 import club.taptappers.telly.data.model.Tale
 import club.taptappers.telly.data.model.TaleLog
 import club.taptappers.telly.data.repository.TaleRepository
 import club.taptappers.telly.gmail.GmailHelper
-import dagger.assisted.Assisted
-import dagger.assisted.AssistedInject
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
@@ -26,15 +20,17 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.concurrent.TimeUnit
+import javax.inject.Inject
+import javax.inject.Singleton
 
-@HiltWorker
-class TaleWorker @AssistedInject constructor(
-    @Assisted context: Context,
-    @Assisted workerParams: WorkerParameters,
+@Singleton
+class TaleExecutor @Inject constructor(
     private val repository: TaleRepository,
-    private val scheduler: TaleScheduler,
     private val gmailHelper: GmailHelper
-) : CoroutineWorker(context, workerParams) {
+) {
+    companion object {
+        private const val TAG = "TaleExecutor"
+    }
 
     private val httpClient = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
@@ -42,14 +38,16 @@ class TaleWorker @AssistedInject constructor(
         .writeTimeout(30, TimeUnit.SECONDS)
         .build()
 
-    override suspend fun doWork(): Result {
-        val taleId = inputData.getString(KEY_TALE_ID) ?: return Result.failure()
-        val rescheduleInterval = inputData.getLong(TaleScheduler.KEY_RESCHEDULE_INTERVAL, 0L)
-
+    suspend fun execute(taleId: String): Boolean {
         val tale = repository.getTaleById(taleId)
-        if (tale == null || !tale.isEnabled) {
-            Log.d(TAG, "Tale $taleId not found or disabled")
-            return Result.success()
+        if (tale == null) {
+            Log.e(TAG, "Tale $taleId not found")
+            return false
+        }
+
+        if (!tale.isEnabled) {
+            Log.d(TAG, "Tale $taleId is disabled, skipping")
+            return false
         }
 
         return try {
@@ -87,14 +85,7 @@ class TaleWorker @AssistedInject constructor(
             repository.updateLastRunAt(taleId, timestamp)
 
             Log.d(TAG, "Tale $taleId executed: $logMessage")
-
-            // Schedule next run for short intervals
-            if (rescheduleInterval > 0 && tale.isEnabled) {
-                scheduler.scheduleNextShortInterval(taleId, rescheduleInterval)
-                Log.d(TAG, "Tale $taleId rescheduled for ${rescheduleInterval}ms")
-            }
-
-            Result.success()
+            true
         } catch (e: Exception) {
             Log.e(TAG, "Tale $taleId failed", e)
 
@@ -104,16 +95,7 @@ class TaleWorker @AssistedInject constructor(
                 success = false
             )
             repository.insertLog(log)
-
-            // Still reschedule even on failure for short intervals
-            if (rescheduleInterval > 0) {
-                val tale2 = repository.getTaleById(taleId)
-                if (tale2?.isEnabled == true) {
-                    scheduler.scheduleNextShortInterval(taleId, rescheduleInterval)
-                }
-            }
-
-            Result.failure()
+            false
         }
     }
 
@@ -229,10 +211,5 @@ class TaleWorker @AssistedInject constructor(
             Log.e(TAG, "Webhook failed for ${tale.name}", e)
             "Error: ${e.message}"
         }
-    }
-
-    companion object {
-        const val TAG = "TaleWorker"
-        const val KEY_TALE_ID = "tale_id"
     }
 }

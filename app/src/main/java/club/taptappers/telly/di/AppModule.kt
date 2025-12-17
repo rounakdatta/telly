@@ -5,6 +5,7 @@ import androidx.room.Room
 import club.taptappers.telly.data.db.TaleDao
 import club.taptappers.telly.data.db.TaleLogDao
 import club.taptappers.telly.data.db.MIGRATION_1_2
+import club.taptappers.telly.data.db.MIGRATION_2_3
 import club.taptappers.telly.data.db.TellyDatabase
 import dagger.Module
 import dagger.Provides
@@ -25,7 +26,7 @@ object AppModule {
             TellyDatabase::class.java,
             "telly_database"
         )
-            .addMigrations(MIGRATION_1_2)
+            .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
             .build()
     }
 

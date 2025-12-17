@@ -5,6 +5,7 @@ import androidx.lifecycle.viewModelScope
 import club.taptappers.telly.data.model.Tale
 import club.taptappers.telly.data.model.TaleLog
 import club.taptappers.telly.data.repository.TaleRepository
+import club.taptappers.telly.service.ServiceManager
 import club.taptappers.telly.worker.TaleScheduler
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -18,7 +19,8 @@ import javax.inject.Inject
 @HiltViewModel
 class TaleViewModel @Inject constructor(
     private val repository: TaleRepository,
-    private val scheduler: TaleScheduler
+    private val scheduler: TaleScheduler,
+    private val serviceManager: ServiceManager
 ) : ViewModel() {
 
     val tales: StateFlow<List<Tale>> = repository.getAllTales()
@@ -49,22 +51,24 @@ class TaleViewModel @Inject constructor(
     fun createTale(tale: Tale) {
         viewModelScope.launch {
             repository.insertTale(tale)
-            scheduler.scheduleTale(tale)
+            if (tale.isEnabled) {
+                serviceManager.startServiceIfNeeded()
+            }
         }
     }
 
     fun updateTale(tale: Tale) {
         viewModelScope.launch {
             repository.updateTale(tale)
-            scheduler.scheduleTale(tale)
+            serviceManager.checkAndManageService()
             _selectedTale.value = tale
         }
     }
 
     fun deleteTale(tale: Tale) {
         viewModelScope.launch {
-            scheduler.cancelTale(tale.id)
             repository.deleteTale(tale)
+            serviceManager.checkAndManageService()
             clearSelectedTale()
         }
     }
@@ -73,7 +77,7 @@ class TaleViewModel @Inject constructor(
         viewModelScope.launch {
             repository.setTaleEnabled(tale.id, enabled)
             val updatedTale = tale.copy(isEnabled = enabled)
-            scheduler.scheduleTale(updatedTale)
+            serviceManager.checkAndManageService()
             if (_selectedTale.value?.id == tale.id) {
                 _selectedTale.value = updatedTale
             }
@@ -81,6 +85,8 @@ class TaleViewModel @Inject constructor(
     }
 
     fun runTaleNow(tale: Tale) {
-        scheduler.runTaleNow(tale)
+        viewModelScope.launch {
+            serviceManager.startServiceIfNeeded()
+        }
     }
 }

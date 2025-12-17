@@ -42,6 +42,17 @@ android {
     buildFeatures {
         compose = true
     }
+
+    packaging {
+        resources {
+            excludes += "/META-INF/{AL2.0,LGPL2.1}"
+            excludes += "META-INF/DEPENDENCIES"
+            excludes += "META-INF/LICENSE"
+            excludes += "META-INF/LICENSE.txt"
+            excludes += "META-INF/NOTICE"
+            excludes += "META-INF/NOTICE.txt"
+        }
+    }
 }
 
 dependencies {
@@ -75,6 +86,12 @@ dependencies {
 
     // OkHttp
     implementation(libs.okhttp)
+
+    // Google/Gmail
+    implementation(libs.play.services.auth)
+    implementation(libs.google.api.client.android)
+    implementation(libs.google.api.services.gmail)
+    implementation(libs.kotlinx.coroutines.play.services)
 
     // Debug
     debugImplementation(libs.androidx.ui.tooling)

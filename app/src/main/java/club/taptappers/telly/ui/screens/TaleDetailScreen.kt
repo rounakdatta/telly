@@ -45,6 +45,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.unit.dp
+import club.taptappers.telly.data.model.ActionType
 import club.taptappers.telly.data.model.ScheduleType
 import club.taptappers.telly.data.model.Tale
 import club.taptappers.telly.data.model.TaleLog
@@ -196,10 +197,33 @@ fun TaleDetailScreen(
                         color = Black
                     )
                     Text(
-                        text = "Fetch Time",
+                        text = when (tale.actionType) {
+                            ActionType.TIME -> "Fetch Time"
+                            ActionType.EMAIL_JUGGLE -> "Email Juggle"
+                        },
                         style = MaterialTheme.typography.bodyLarge,
                         color = Gray500
                     )
+                }
+
+                // Search query (for Email Juggle)
+                if (tale.actionType == ActionType.EMAIL_JUGGLE && !tale.searchQuery.isNullOrBlank()) {
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Text(
+                            text = "Search Query",
+                            style = MaterialTheme.typography.bodyLarge,
+                            color = Black
+                        )
+                        Text(
+                            text = tale.searchQuery,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = Gray500,
+                            maxLines = 2
+                        )
+                    }
                 }
 
                 // Webhook URL
