@@ -24,7 +24,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Calendar
@@ -69,6 +69,10 @@ class TellyForegroundService : Service() {
     private var wakeLock: PowerManager.WakeLock? = null
     private val handler = Handler(Looper.getMainLooper())
 
+    // Snapshot of enabled tales, kept in sync with the DB via a Flow subscription.
+    // Avoids re-querying the DB on every scheduler tick.
+    private val enabledTales = MutableStateFlow<List<Tale>>(emptyList())
+
     // Track last execution times to prevent duplicate runs
     private val lastExecutionTimes = mutableMapOf<String, Long>()
 
@@ -87,8 +91,21 @@ class TellyForegroundService : Service() {
         // Start as foreground immediately with initial notification
         startForeground(NOTIFICATION_ID, createNotification("Starting..."))
 
-        // Start the scheduler loop
-        startSchedulerLoop()
+        // Subscribe to the enabled-tales projection of the DB. Updates flow in
+        // automatically as tales are added/edited/toggled, without each tick paying
+        // the cost of a fresh query. The scheduler loop is only started once the
+        // first emission lands, so the initial tick is guaranteed to see real data
+        // (otherwise the empty default would trip the "no tales, stop" branch).
+        serviceScope.launch {
+            var loopStarted = false
+            repository.getAllTales().collect { tales ->
+                enabledTales.value = tales.filter { it.isEnabled }
+                if (!loopStarted) {
+                    loopStarted = true
+                    startSchedulerLoop()
+                }
+            }
+        }
 
         // Return STICKY to ensure restart if killed
         return START_STICKY
@@ -195,10 +212,9 @@ class TellyForegroundService : Service() {
     }
 
     private suspend fun checkAndExecuteTales() {
-        val tales = repository.getAllTales().first()
-        val enabledTales = tales.filter { it.isEnabled }
+        val tales = enabledTales.value
 
-        if (enabledTales.isEmpty()) {
+        if (tales.isEmpty()) {
             Log.d(TAG, "No enabled tales, stopping service")
             handler.post {
                 updateNotification("No active tales")
@@ -208,14 +224,12 @@ class TellyForegroundService : Service() {
         }
 
         val now = System.currentTimeMillis()
-        var executedCount = 0
         val statusParts = mutableListOf<String>()
 
-        for (tale in enabledTales) {
-            val shouldRun = shouldTaleRun(tale, now)
-
-            if (shouldRun) {
-                // Check if we recently executed this tale (prevent duplicates)
+        for (tale in tales) {
+            if (shouldTaleRun(tale, now)) {
+                // Skip if we recently executed this tale; the DB-backed lastRunAt
+                // hasn't propagated through the Flow yet within a single tick.
                 val lastExec = lastExecutionTimes[tale.id] ?: 0L
                 if (now - lastExec < MIN_EXECUTION_GAP_MS) {
                     Log.d(TAG, "Skipping ${tale.name} - executed ${now - lastExec}ms ago")
@@ -228,10 +242,7 @@ class TellyForegroundService : Service() {
                 try {
                     val success = taleExecutor.execute(tale.id)
                     if (success) {
-                        executedCount++
-                        handler.post {
-                            showToast("Executed: ${tale.name}")
-                        }
+                        handler.post { showToast("Executed: ${tale.name}") }
                     }
                 } catch (e: Exception) {
                     Log.e(TAG, "Error executing ${tale.name}", e)
@@ -248,7 +259,7 @@ class TellyForegroundService : Service() {
 
         // Update notification with next run times
         val status = if (statusParts.isEmpty()) {
-            "${enabledTales.size} tales active"
+            "${tales.size} tales active"
         } else {
             statusParts.take(2).joinToString(" | ")
         }

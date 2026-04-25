@@ -79,11 +79,6 @@ dependencies {
     ksp(libs.hilt.compiler)
     implementation(libs.hilt.navigation.compose)
 
-    // WorkManager
-    implementation(libs.androidx.work.runtime.ktx)
-    implementation(libs.hilt.work)
-    ksp(libs.hilt.work.compiler)
-
     // OkHttp
     implementation(libs.okhttp)
 

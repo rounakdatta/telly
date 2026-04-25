@@ -6,7 +6,7 @@ import club.taptappers.telly.data.model.Tale
 import club.taptappers.telly.data.model.TaleLog
 import club.taptappers.telly.data.repository.TaleRepository
 import club.taptappers.telly.service.ServiceManager
-import club.taptappers.telly.worker.TaleScheduler
+import club.taptappers.telly.service.TaleExecutor
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -19,8 +19,8 @@ import javax.inject.Inject
 @HiltViewModel
 class TaleViewModel @Inject constructor(
     private val repository: TaleRepository,
-    private val scheduler: TaleScheduler,
-    private val serviceManager: ServiceManager
+    private val serviceManager: ServiceManager,
+    private val taleExecutor: TaleExecutor
 ) : ViewModel() {
 
     val tales: StateFlow<List<Tale>> = repository.getAllTales()
@@ -86,7 +86,7 @@ class TaleViewModel @Inject constructor(
 
     fun runTaleNow(tale: Tale) {
         viewModelScope.launch {
-            serviceManager.startServiceIfNeeded()
+            taleExecutor.execute(tale.id)
         }
     }
 }
