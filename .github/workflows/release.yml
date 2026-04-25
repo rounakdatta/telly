@@ -1,0 +1,65 @@
+name: Build & release APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Build debug APK
+        run: ./gradlew assembleDebug --no-daemon --stacktrace
+
+      - name: Compute build metadata
+        id: meta
+        run: |
+          short_sha="$(git rev-parse --short HEAD)"
+          timestamp="$(date -u +%Y%m%d-%H%M%S)"
+          echo "short_sha=${short_sha}" >> "$GITHUB_OUTPUT"
+          echo "timestamp=${timestamp}" >> "$GITHUB_OUTPUT"
+          echo "tag=build-${timestamp}-${short_sha}" >> "$GITHUB_OUTPUT"
+
+      - name: Stage APK for release
+        run: |
+          mkdir -p out
+          cp app/build/outputs/apk/debug/app-debug.apk \
+             "out/telly-${{ steps.meta.outputs.timestamp }}-${{ steps.meta.outputs.short_sha }}.apk"
+          ls -la out
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: telly ${{ steps.meta.outputs.timestamp }} (${{ steps.meta.outputs.short_sha }})
+          body: |
+            Automated debug build.
+            Branch: `${{ github.ref_name }}`
+            Commit: ${{ github.sha }}
+          files: out/*.apk
+          draft: false
+          prerelease: false
+          make_latest: true
