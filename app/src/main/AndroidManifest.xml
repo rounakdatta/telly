@@ -38,6 +38,17 @@
         </activity>
 
         <!--
+            Hevy WebView login. Hosts a WebView at hevy.com/login so the user
+            can complete Hevy's reCAPTCHA-protected flow that we can't fake
+            natively. After login, Hevy's response sets the auth2.0-token
+            cookie which the activity captures and persists.
+        -->
+        <activity
+            android:name=".hevy.HevyWebLoginActivity"
+            android:exported="false"
+            android:theme="@style/Theme.Telly" />
+
+        <!--
             Health Connect privacy-policy / rationale activity.
             On Android <=13 the Health Connect provider app uses this filter
             to link to the app's policy from its permission UI.

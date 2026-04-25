@@ -1,7 +1,5 @@
 package club.taptappers.telly.hevy
 
-import org.json.JSONObject
-import java.net.URLDecoder
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -44,38 +42,39 @@ class HevyAuthState @Inject constructor(
     }
 
     /**
-     * Accepts either:
-     * - the raw value of the `auth2.0-token` cookie (URL-encoded JSON), or
-     * - the already-decoded JSON object verbatim.
+     * Called from [club.taptappers.telly.hevy.HevyWebLoginActivity] once the
+     * WebView captures the `auth2.0-token` cookie set by Hevy's web login
+     * flow. Parses the cookie, persists the tokens atomically, and verifies
+     * via `/account`. Returns null on success, or a human-readable error
+     * (also surfaced as [HevyAuthStatus.Error]).
      *
-     * Parses out access_token / refresh_token / expires_at, persists, then
-     * verifies via `/account` and caches the username for display. Returns
-     * null on success, or a human-readable error message on failure (which
-     * also lands as `HevyAuthStatus.Error`).
+     * Wraps everything in a try/catch — the only terminal states allowed
+     * are [HevyAuthStatus.Authorized] or [HevyAuthStatus.Error]. The
+     * spinner must never be left dangling.
      */
-    suspend fun saveAuthCookieAndVerify(input: String): String? {
+    suspend fun handleWebLoginCookie(rawCookieValue: String): String? {
         _status.value = HevyAuthStatus.Verifying
-
-        val parsed = parseCookieValue(input.trim())
-        if (parsed == null) {
-            val msg = "Couldn't parse auth2.0-token. Paste the cookie value (URL-encoded JSON) or the decoded JSON directly."
-            _status.value = HevyAuthStatus.Error(msg)
-            return msg
-        }
-        secrets.persistTokens(
-            access = parsed.access,
-            refresh = parsed.refresh,
-            expiresAtIso = parsed.expiresAt
-        )
-
-        val username = helper.verifyAndCacheUsername()
-        return if (username != null) {
-            _status.value = HevyAuthStatus.Authorized(username)
-            null
-        } else {
-            // Verification failed — wipe so we don't pretend we're authorized.
+        return try {
+            val tokens = helper.parseAuthCookieValue(rawCookieValue)
+            if (tokens == null) {
+                val msg = "Couldn't parse auth2.0-token from web login. Try logging in again."
+                _status.value = HevyAuthStatus.Error(msg)
+                return msg
+            }
+            helper.persistTokens(tokens)
+            val username = helper.verifyAndCacheUsername()
+            if (username != null) {
+                _status.value = HevyAuthStatus.Authorized(username)
+                null
+            } else {
+                secrets.clearTokens()
+                val msg = "Cookie captured but /account verification failed. Try logging in again."
+                _status.value = HevyAuthStatus.Error(msg)
+                msg
+            }
+        } catch (e: Exception) {
             secrets.clearTokens()
-            val msg = "Tokens saved but /account verification failed. Re-extract the auth2.0-token cookie from app.hevyapp.com."
+            val msg = "Web-login crash: ${e.javaClass.simpleName}: ${e.message}"
             _status.value = HevyAuthStatus.Error(msg)
             msg
         }
@@ -89,29 +88,5 @@ class HevyAuthState @Inject constructor(
     fun clearAll() {
         helper.clearAll()
         _status.value = deriveStatus()
-    }
-
-    private data class ParsedCookie(
-        val access: String,
-        val refresh: String,
-        val expiresAt: String
-    )
-
-    private fun parseCookieValue(raw: String): ParsedCookie? {
-        if (raw.isEmpty()) return null
-        // The cookie value is URL-encoded JSON. Decode if it looks encoded.
-        val candidate = if (raw.startsWith("{")) raw
-        else try { URLDecoder.decode(raw, "UTF-8") } catch (_: Exception) { return null }
-
-        return try {
-            val json = JSONObject(candidate)
-            ParsedCookie(
-                access = json.getString("access_token"),
-                refresh = json.getString("refresh_token"),
-                expiresAt = json.getString("expires_at")
-            )
-        } catch (_: Exception) {
-            null
-        }
     }
 }

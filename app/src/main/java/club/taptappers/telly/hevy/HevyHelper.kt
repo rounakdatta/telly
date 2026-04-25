@@ -11,6 +11,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
+import java.net.URLDecoder
 import java.time.Instant
 import java.util.concurrent.TimeUnit
 import javax.inject.Inject
@@ -41,6 +42,37 @@ class HevyHelper @Inject constructor(
     fun username(): String? = secrets.username
 
     // -------- V2 auth surface --------
+
+    data class TokenSet(val access: String, val refresh: String, val expiresAtIso: String)
+
+    /**
+     * Parses the `auth2.0-token` cookie value Hevy's web sets after a
+     * successful login. Accepts either the URL-encoded form (as it sits in
+     * `CookieManager`) or the already-decoded JSON object. Used by
+     * [club.taptappers.telly.hevy.HevyWebLoginActivity] to capture tokens
+     * minted by Hevy's real web login flow (which includes reCAPTCHA — we
+     * can't replicate that natively, so the WebView is the path).
+     */
+    fun parseAuthCookieValue(raw: String): TokenSet? {
+        if (raw.isBlank()) return null
+        val candidate = if (raw.trimStart().startsWith("{")) raw
+            else try { URLDecoder.decode(raw, "UTF-8") } catch (_: Exception) { return null }
+        return try {
+            val json = JSONObject(candidate)
+            TokenSet(
+                access = json.getString("access_token"),
+                refresh = json.getString("refresh_token"),
+                expiresAtIso = json.getString("expires_at")
+            )
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /** Persists a [TokenSet] atomically — used by the web-login flow. */
+    fun persistTokens(tokens: TokenSet) {
+        secrets.persistTokens(tokens.access, tokens.refresh, tokens.expiresAtIso)
+    }
 
     /**
      * Hits `/account` to verify the current access token works AND captures
