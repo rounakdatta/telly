@@ -6,7 +6,8 @@ import java.util.UUID
 
 enum class ActionType {
     TIME,
-    EMAIL_JUGGLE
+    EMAIL_JUGGLE,
+    STRAVA_LAST_HEVY
 }
 
 enum class ScheduleType {

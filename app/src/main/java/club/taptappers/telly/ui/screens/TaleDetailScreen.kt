@@ -200,6 +200,7 @@ fun TaleDetailScreen(
                         text = when (tale.actionType) {
                             ActionType.TIME -> "Fetch Time"
                             ActionType.EMAIL_JUGGLE -> "Email Juggle"
+                            ActionType.STRAVA_LAST_HEVY -> "Strava (Hevy)"
                         },
                         style = MaterialTheme.typography.bodyLarge,
                         color = Gray500

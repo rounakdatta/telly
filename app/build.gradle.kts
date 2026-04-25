@@ -82,6 +82,9 @@ dependencies {
     // OkHttp
     implementation(libs.okhttp)
 
+    // Encrypted storage for OAuth secrets/tokens
+    implementation(libs.androidx.security.crypto)
+
     // Google/Gmail
     implementation(libs.play.services.auth)
     implementation(libs.google.api.client.android)

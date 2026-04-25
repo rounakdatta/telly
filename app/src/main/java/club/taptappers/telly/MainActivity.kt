@@ -21,6 +21,7 @@ import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import club.taptappers.telly.gmail.GmailAuthState
 import club.taptappers.telly.service.ServiceManager
+import club.taptappers.telly.strava.StravaAuthState
 import club.taptappers.telly.ui.screens.CreateTaleScreen
 import club.taptappers.telly.ui.screens.HomeScreen
 import club.taptappers.telly.ui.screens.TaleDetailScreen
@@ -34,6 +35,9 @@ import javax.inject.Inject
 class MainActivity : ComponentActivity() {
     @Inject
     lateinit var gmailAuthState: GmailAuthState
+
+    @Inject
+    lateinit var stravaAuthState: StravaAuthState
 
     @Inject
     lateinit var serviceManager: ServiceManager
@@ -63,7 +67,7 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             TellyTheme {
-                TellyApp(gmailAuthState)
+                TellyApp(gmailAuthState, stravaAuthState)
             }
         }
     }
@@ -97,7 +101,10 @@ sealed class Screen(val route: String) {
 }
 
 @Composable
-fun TellyApp(gmailAuthState: GmailAuthState) {
+fun TellyApp(
+    gmailAuthState: GmailAuthState,
+    stravaAuthState: StravaAuthState
+) {
     val navController = rememberNavController()
     val viewModel: TaleViewModel = hiltViewModel()
     val tales by viewModel.tales.collectAsState()
@@ -126,7 +133,8 @@ fun TellyApp(gmailAuthState: GmailAuthState) {
                     navController.popBackStack()
                 },
                 onBack = { navController.popBackStack() },
-                gmailAuthState = gmailAuthState
+                gmailAuthState = gmailAuthState,
+                stravaAuthState = stravaAuthState
             )
         }
 
@@ -142,7 +150,8 @@ fun TellyApp(gmailAuthState: GmailAuthState) {
                         navController.popBackStack()
                     },
                     onBack = { navController.popBackStack() },
-                    gmailAuthState = gmailAuthState
+                    gmailAuthState = gmailAuthState,
+                    stravaAuthState = stravaAuthState
                 )
             }
         }

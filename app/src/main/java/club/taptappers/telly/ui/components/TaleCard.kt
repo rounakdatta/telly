@@ -85,6 +85,7 @@ private fun getActionLabel(actionType: ActionType): String {
     return when (actionType) {
         ActionType.TIME -> "Time"
         ActionType.EMAIL_JUGGLE -> "Email"
+        ActionType.STRAVA_LAST_HEVY -> "Strava"
     }
 }
 

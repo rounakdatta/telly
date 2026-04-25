@@ -1,6 +1,8 @@
 package club.taptappers.telly.ui.screens
 
 import android.app.Activity
+import android.content.Intent
+import android.net.Uri
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -47,6 +49,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -59,7 +62,10 @@ import club.taptappers.telly.data.model.ScheduleType
 import club.taptappers.telly.data.model.Tale
 import club.taptappers.telly.gmail.GmailAuthState
 import club.taptappers.telly.gmail.GmailAuthStatus
+import club.taptappers.telly.strava.StravaAuthState
+import club.taptappers.telly.strava.StravaAuthStatus
 import club.taptappers.telly.ui.theme.Black
+import kotlinx.coroutines.launch
 import club.taptappers.telly.ui.theme.Gray100
 import club.taptappers.telly.ui.theme.Gray200
 import club.taptappers.telly.ui.theme.Gray500
@@ -133,6 +139,7 @@ fun parseIntervalToCustom(ms: Long): Pair<Int, IntervalUnit> {
 fun CreateTaleScreen(
     existingTale: Tale? = null,
     gmailAuthState: GmailAuthState?,
+    stravaAuthState: StravaAuthState? = null,
     onSave: (Tale) -> Unit,
     onBack: () -> Unit,
     modifier: Modifier = Modifier
@@ -160,7 +167,17 @@ fun CreateTaleScreen(
     val gmailAuthStatus by gmailAuthState?.authStatus?.collectAsState()
         ?: remember { mutableStateOf(GmailAuthStatus.NotSignedIn) }
 
+    val stravaAuthStatus by stravaAuthState?.status?.collectAsState()
+        ?: remember { mutableStateOf<StravaAuthStatus>(StravaAuthStatus.NotConfigured) }
+
     val context = LocalContext.current
+
+    // Re-derive Strava status from disk on entry so the UI reflects any
+    // background-cleared tokens (e.g., a refresh failed in a tale run while
+    // this screen wasn't visible).
+    LaunchedEffect(stravaAuthState) {
+        stravaAuthState?.refresh()
+    }
 
     val signInLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult()
@@ -188,6 +205,9 @@ fun CreateTaleScreen(
         ActionType.TIME -> true
         ActionType.EMAIL_JUGGLE -> {
             searchQuery.isNotBlank() && gmailAuthStatus is GmailAuthStatus.SignedIn
+        }
+        ActionType.STRAVA_LAST_HEVY -> {
+            stravaAuthStatus is StravaAuthStatus.SignedIn
         }
     }
 
@@ -274,6 +294,12 @@ fun CreateTaleScreen(
                         label = "Email Juggle",
                         selected = actionType == ActionType.EMAIL_JUGGLE,
                         onClick = { actionType = ActionType.EMAIL_JUGGLE },
+                        modifier = Modifier.weight(1f)
+                    )
+                    ActionTypeChip(
+                        label = "Strava Hevy",
+                        selected = actionType == ActionType.STRAVA_LAST_HEVY,
+                        onClick = { actionType = ActionType.STRAVA_LAST_HEVY },
                         modifier = Modifier.weight(1f)
                     )
                 }
@@ -405,6 +431,14 @@ fun CreateTaleScreen(
                         color = Gray500
                     )
                 }
+            }
+
+            // Strava specific options
+            if (actionType == ActionType.STRAVA_LAST_HEVY) {
+                StravaAccountSection(
+                    stravaAuthState = stravaAuthState,
+                    stravaAuthStatus = stravaAuthStatus
+                )
             }
 
             // Schedule type
@@ -858,5 +892,268 @@ private fun TimeInput(
                 }
             }
         )
+    }
+}
+
+@Composable
+private fun StravaAccountSection(
+    stravaAuthState: StravaAuthState?,
+    stravaAuthStatus: StravaAuthStatus
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+
+    val openAuthUrl: () -> Unit = {
+        stravaAuthState?.authorizationUrl()?.let { url ->
+            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+        } ?: Toast.makeText(
+            context,
+            "Save your client credentials first",
+            Toast.LENGTH_SHORT
+        ).show()
+    }
+
+    val submitCode: (String) -> Unit = { input ->
+        scope.launch { stravaAuthState?.submitAuthorizationCode(input) }
+    }
+
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text(
+            text = "Strava Account",
+            style = MaterialTheme.typography.labelLarge,
+            color = Black
+        )
+
+        when (stravaAuthStatus) {
+            is StravaAuthStatus.NotConfigured -> {
+                StravaCredentialsForm(
+                    onSave = { id, secret -> stravaAuthState?.saveCredentials(id, secret) }
+                )
+            }
+            is StravaAuthStatus.NotSignedIn -> {
+                StravaAuthorizeStep(
+                    onOpenAuthUrl = openAuthUrl,
+                    onSubmitCode = submitCode,
+                    onChangeCredentials = { stravaAuthState?.clearAll() },
+                    error = null
+                )
+            }
+            is StravaAuthStatus.Authorizing -> {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .border(1.dp, Gray200, RoundedCornerShape(8.dp))
+                        .padding(16.dp),
+                    horizontalArrangement = Arrangement.Center,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(20.dp),
+                        strokeWidth = 2.dp,
+                        color = Black
+                    )
+                    Spacer(modifier = Modifier.size(8.dp))
+                    Text("Verifying with Strava...", color = Gray500)
+                }
+            }
+            is StravaAuthStatus.SignedIn -> {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .border(1.dp, Green500, RoundedCornerShape(8.dp))
+                        .padding(16.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            Icons.Default.Check,
+                            contentDescription = null,
+                            tint = Green500,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Text(
+                            text = stravaAuthStatus.athleteName ?: "Connected",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = Black
+                        )
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Text(
+                            text = "Sign out",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = Gray500,
+                            modifier = Modifier.clickable { stravaAuthState?.signOut() }
+                        )
+                        Text(
+                            text = "Reset",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = Gray500,
+                            modifier = Modifier.clickable { stravaAuthState?.clearAll() }
+                        )
+                    }
+                }
+            }
+            is StravaAuthStatus.Error -> {
+                StravaAuthorizeStep(
+                    onOpenAuthUrl = openAuthUrl,
+                    onSubmitCode = submitCode,
+                    onChangeCredentials = { stravaAuthState?.clearAll() },
+                    error = stravaAuthStatus.message
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun StravaCredentialsForm(
+    onSave: (String, String) -> Unit
+) {
+    var clientId by remember { mutableStateOf("") }
+    var clientSecret by remember { mutableStateOf("") }
+
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text(
+            text = "Register a personal app at strava.com/settings/api with " +
+                "Authorization Callback Domain set to localhost. Paste its " +
+                "Client ID and Client Secret below — both are stored encrypted " +
+                "on this device only.",
+            style = MaterialTheme.typography.bodySmall,
+            color = Gray500
+        )
+        BasicTextField(
+            value = clientId,
+            onValueChange = { clientId = it },
+            singleLine = true,
+            textStyle = MaterialTheme.typography.bodyLarge.copy(color = Black),
+            modifier = Modifier
+                .fillMaxWidth()
+                .border(1.dp, Gray200, RoundedCornerShape(8.dp))
+                .padding(16.dp),
+            decorationBox = { innerTextField ->
+                Box {
+                    if (clientId.isEmpty()) {
+                        Text(
+                            text = "Client ID",
+                            style = MaterialTheme.typography.bodyLarge,
+                            color = Gray500
+                        )
+                    }
+                    innerTextField()
+                }
+            }
+        )
+        BasicTextField(
+            value = clientSecret,
+            onValueChange = { clientSecret = it },
+            singleLine = true,
+            textStyle = MaterialTheme.typography.bodyLarge.copy(color = Black),
+            modifier = Modifier
+                .fillMaxWidth()
+                .border(1.dp, Gray200, RoundedCornerShape(8.dp))
+                .padding(16.dp),
+            decorationBox = { innerTextField ->
+                Box {
+                    if (clientSecret.isEmpty()) {
+                        Text(
+                            text = "Client Secret",
+                            style = MaterialTheme.typography.bodyLarge,
+                            color = Gray500
+                        )
+                    }
+                    innerTextField()
+                }
+            }
+        )
+        OutlinedButton(
+            onClick = { onSave(clientId, clientSecret) },
+            enabled = clientId.isNotBlank() && clientSecret.isNotBlank(),
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(8.dp)
+        ) {
+            Text("Save credentials")
+        }
+    }
+}
+
+@Composable
+private fun StravaAuthorizeStep(
+    onOpenAuthUrl: () -> Unit,
+    onSubmitCode: (String) -> Unit,
+    onChangeCredentials: () -> Unit,
+    error: String?
+) {
+    var code by remember { mutableStateOf("") }
+
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        OutlinedButton(
+            onClick = onOpenAuthUrl,
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(8.dp)
+        ) {
+            Text("Open Strava authorization")
+        }
+        Text(
+            text = "Authorize in your browser. It will land on a localhost page " +
+                "that fails to load — that's expected. Copy the full URL from " +
+                "the address bar (or just the code parameter) and paste it below.",
+            style = MaterialTheme.typography.bodySmall,
+            color = Gray500
+        )
+        BasicTextField(
+            value = code,
+            onValueChange = { code = it },
+            textStyle = MaterialTheme.typography.bodyLarge.copy(color = Black),
+            modifier = Modifier
+                .fillMaxWidth()
+                .border(1.dp, Gray200, RoundedCornerShape(8.dp))
+                .padding(16.dp),
+            decorationBox = { innerTextField ->
+                Box {
+                    if (code.isEmpty()) {
+                        Text(
+                            text = "Paste URL or code",
+                            style = MaterialTheme.typography.bodyLarge,
+                            color = Gray500
+                        )
+                    }
+                    innerTextField()
+                }
+            }
+        )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            OutlinedButton(
+                onClick = {
+                    onSubmitCode(code)
+                    code = ""
+                },
+                enabled = code.isNotBlank(),
+                modifier = Modifier.weight(1f),
+                shape = RoundedCornerShape(8.dp)
+            ) {
+                Text("Submit")
+            }
+            OutlinedButton(
+                onClick = onChangeCredentials,
+                modifier = Modifier.weight(1f),
+                shape = RoundedCornerShape(8.dp)
+            ) {
+                Text("Reset credentials")
+            }
+        }
+        if (error != null) {
+            Text(
+                text = error,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error
+            )
+        }
     }
 }

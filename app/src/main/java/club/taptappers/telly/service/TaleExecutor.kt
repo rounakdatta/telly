@@ -8,6 +8,7 @@ import club.taptappers.telly.data.model.Tale
 import club.taptappers.telly.data.model.TaleLog
 import club.taptappers.telly.data.repository.TaleRepository
 import club.taptappers.telly.gmail.GmailHelper
+import club.taptappers.telly.strava.StravaHelper
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
@@ -26,7 +27,8 @@ import javax.inject.Singleton
 @Singleton
 class TaleExecutor @Inject constructor(
     private val repository: TaleRepository,
-    private val gmailHelper: GmailHelper
+    private val gmailHelper: GmailHelper,
+    private val stravaHelper: StravaHelper
 ) {
     companion object {
         private const val TAG = "TaleExecutor"
@@ -58,6 +60,7 @@ class TaleExecutor @Inject constructor(
             val resultSummary = when (actionResult) {
                 is ActionResult.Simple -> actionResult.result
                 is ActionResult.EmailJuggle -> actionResult.summary
+                is ActionResult.Strava -> actionResult.summary
             }
 
             // POST to webhook if configured
@@ -108,6 +111,31 @@ class TaleExecutor @Inject constructor(
             ActionType.EMAIL_JUGGLE -> {
                 executeEmailJuggle(tale, timestamp)
             }
+            ActionType.STRAVA_LAST_HEVY -> {
+                executeStravaLastHevy()
+            }
+        }
+    }
+
+    private suspend fun executeStravaLastHevy(): ActionResult {
+        if (!stravaHelper.isAuthorized()) {
+            return ActionResult.Simple("Error: Strava not authorized")
+        }
+        return try {
+            val activity = stravaHelper.getLastHevyActivity()
+            if (activity == null) {
+                ActionResult.Simple("No Hevy activity found in recent activities")
+            } else {
+                val name = activity.optString("name", "(unnamed)")
+                ActionResult.Strava(
+                    summary = "Got Hevy activity: $name",
+                    activityId = activity.optLong("id"),
+                    activityJson = activity
+                )
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Strava action failed", e)
+            ActionResult.Simple("Error: ${e.message}")
         }
     }
 
@@ -157,6 +185,11 @@ class TaleExecutor @Inject constructor(
             val emailCount: Int,
             val emailsJson: JSONArray
         ) : ActionResult()
+        data class Strava(
+            val summary: String,
+            val activityId: Long,
+            val activityJson: JSONObject
+        ) : ActionResult()
     }
 
     private suspend fun postToWebhook(
@@ -188,6 +221,11 @@ class TaleExecutor @Inject constructor(
                         put("summary", actionResult.summary)
                         put("emailCount", actionResult.emailCount)
                         put("emails", actionResult.emailsJson)
+                    }
+                    is ActionResult.Strava -> JSONObject().apply {
+                        put("summary", actionResult.summary)
+                        put("activityId", actionResult.activityId)
+                        put("activity", actionResult.activityJson)
                     }
                 })
             }

@@ -11,6 +11,7 @@ hilt = "2.54"
 hiltNavigationCompose = "1.2.0"
 navigationCompose = "2.8.2"
 okhttp = "4.12.0"
+securityCrypto = "1.1.0-alpha06"
 playServicesAuth = "21.2.0"
 googleApiClient = "2.7.0"
 gmailApi = "v1-rev20231218-2.0.0"
@@ -41,6 +42,9 @@ hilt-navigation-compose = { group = "androidx.hilt", name = "hilt-navigation-com
 
 # OkHttp
 okhttp = { group = "com.squareup.okhttp3", name = "okhttp", version.ref = "okhttp" }
+
+# Security (encrypted prefs for OAuth secrets)
+androidx-security-crypto = { group = "androidx.security", name = "security-crypto", version.ref = "securityCrypto" }
 
 # Google/Gmail
 play-services-auth = { group = "com.google.android.gms", name = "play-services-auth", version.ref = "playServicesAuth" }
