@@ -8,6 +8,16 @@
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <!-- Health Connect: read-only HR + calorie samples for workout windows -->
+    <uses-permission android:name="android.permission.health.READ_HEART_RATE" />
+    <uses-permission android:name="android.permission.health.READ_ACTIVE_CALORIES_BURNED" />
+    <uses-permission android:name="android.permission.health.READ_TOTAL_CALORIES_BURNED" />
+
+    <!-- Required to talk to the Health Connect provider package on Android <14 -->
+    <queries>
+        <package android:name="com.google.android.apps.healthdata" />
+    </queries>
+
     <application
         android:name=".TellyApplication"
         android:allowBackup="true"
@@ -26,6 +36,38 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!--
+            Health Connect privacy-policy / rationale activity.
+            On Android <=13 the Health Connect provider app uses this filter
+            to link to the app's policy from its permission UI.
+            On Android 14+ the system silently refuses to launch the
+            permission UI unless this activity is declared.
+        -->
+        <activity
+            android:name=".PermissionsRationaleActivity"
+            android:exported="true"
+            android:theme="@style/Theme.Telly">
+            <intent-filter>
+                <action android:name="androidx.health.ACTION_SHOW_PERMISSIONS_RATIONALE" />
+            </intent-filter>
+        </activity>
+
+        <!--
+            Android 14+ contract: VIEW_PERMISSION_USAGE / HEALTH_PERMISSIONS.
+            Protected by START_VIEW_PERMISSION_USAGE so only the system can
+            launch it. Routes to the same rationale screen.
+        -->
+        <activity-alias
+            android:name=".ViewPermissionUsageActivity"
+            android:exported="true"
+            android:targetActivity=".PermissionsRationaleActivity"
+            android:permission="android.permission.START_VIEW_PERMISSION_USAGE">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW_PERMISSION_USAGE" />
+                <category android:name="android.intent.category.HEALTH_PERMISSIONS" />
+            </intent-filter>
+        </activity-alias>
 
         <!-- Foreground service for reliable background execution -->
         <service

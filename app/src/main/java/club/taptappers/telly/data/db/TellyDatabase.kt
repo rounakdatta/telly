@@ -37,9 +37,17 @@ val MIGRATION_2_3 = object : Migration(2, 3) {
     }
 }
 
+val MIGRATION_3_4 = object : Migration(3, 4) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE tales ADD COLUMN reactionsJson TEXT")
+        // No data migration: TaleExecutor falls back to webhookUrl when
+        // reactionsJson is NULL, so existing tales keep working unchanged.
+    }
+}
+
 @Database(
     entities = [Tale::class, TaleLog::class],
-    version = 3,
+    version = 4,
     exportSchema = false
 )
 @TypeConverters(Converters::class)

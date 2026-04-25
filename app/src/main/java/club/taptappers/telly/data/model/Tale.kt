@@ -7,7 +7,8 @@ import java.util.UUID
 enum class ActionType {
     TIME,
     EMAIL_JUGGLE,
-    STRAVA_LAST_HEVY
+    STRAVA_LAST_HEVY,
+    HEVY_LAST_WORKOUT
 }
 
 enum class ScheduleType {
@@ -24,8 +25,9 @@ data class Tale(
     val actionType: ActionType = ActionType.TIME,
     val scheduleType: ScheduleType,
     val scheduleValue: String? = null, // interval in ms, or HH:mm for daily
-    val webhookUrl: String? = null, // HTTP endpoint to POST results to
+    val webhookUrl: String? = null, // legacy: kept for back-compat; new tales encode webhooks inside reactionsJson
     val searchQuery: String? = null, // Gmail search query for EMAIL_JUGGLE
+    val reactionsJson: String? = null, // ordered chain of Reactions (see ReactionCodec). null = legacy fallback to webhookUrl.
     val isEnabled: Boolean = true,
     val createdAt: Long = System.currentTimeMillis(),
     val lastRunAt: Long? = null

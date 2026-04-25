@@ -20,6 +20,8 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import club.taptappers.telly.gmail.GmailAuthState
+import club.taptappers.telly.health.HealthConnectAuthState
+import club.taptappers.telly.hevy.HevyAuthState
 import club.taptappers.telly.service.ServiceManager
 import club.taptappers.telly.strava.StravaAuthState
 import club.taptappers.telly.ui.screens.CreateTaleScreen
@@ -38,6 +40,12 @@ class MainActivity : ComponentActivity() {
 
     @Inject
     lateinit var stravaAuthState: StravaAuthState
+
+    @Inject
+    lateinit var healthConnectAuthState: HealthConnectAuthState
+
+    @Inject
+    lateinit var hevyAuthState: HevyAuthState
 
     @Inject
     lateinit var serviceManager: ServiceManager
@@ -67,7 +75,12 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             TellyTheme {
-                TellyApp(gmailAuthState, stravaAuthState)
+                TellyApp(
+                    gmailAuthState = gmailAuthState,
+                    stravaAuthState = stravaAuthState,
+                    healthConnectAuthState = healthConnectAuthState,
+                    hevyAuthState = hevyAuthState
+                )
             }
         }
     }
@@ -103,7 +116,9 @@ sealed class Screen(val route: String) {
 @Composable
 fun TellyApp(
     gmailAuthState: GmailAuthState,
-    stravaAuthState: StravaAuthState
+    stravaAuthState: StravaAuthState,
+    healthConnectAuthState: HealthConnectAuthState,
+    hevyAuthState: HevyAuthState
 ) {
     val navController = rememberNavController()
     val viewModel: TaleViewModel = hiltViewModel()
@@ -134,7 +149,8 @@ fun TellyApp(
                 },
                 onBack = { navController.popBackStack() },
                 gmailAuthState = gmailAuthState,
-                stravaAuthState = stravaAuthState
+                stravaAuthState = stravaAuthState,
+                healthConnectAuthState = healthConnectAuthState
             )
         }
 
@@ -151,7 +167,9 @@ fun TellyApp(
                     },
                     onBack = { navController.popBackStack() },
                     gmailAuthState = gmailAuthState,
-                    stravaAuthState = stravaAuthState
+                    stravaAuthState = stravaAuthState,
+                    healthConnectAuthState = healthConnectAuthState,
+                    hevyAuthState = hevyAuthState
                 )
             }
         }

@@ -29,6 +29,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Email
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -57,11 +59,18 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import androidx.health.connect.client.PermissionController
 import club.taptappers.telly.data.model.ActionType
+import club.taptappers.telly.data.model.Reaction
+import club.taptappers.telly.data.model.ReactionCodec
 import club.taptappers.telly.data.model.ScheduleType
 import club.taptappers.telly.data.model.Tale
 import club.taptappers.telly.gmail.GmailAuthState
 import club.taptappers.telly.gmail.GmailAuthStatus
+import club.taptappers.telly.health.HealthConnectAuthState
+import club.taptappers.telly.health.HealthConnectStatus
+import club.taptappers.telly.hevy.HevyAuthState
+import club.taptappers.telly.hevy.HevyAuthStatus
 import club.taptappers.telly.strava.StravaAuthState
 import club.taptappers.telly.strava.StravaAuthStatus
 import club.taptappers.telly.ui.theme.Black
@@ -140,6 +149,8 @@ fun CreateTaleScreen(
     existingTale: Tale? = null,
     gmailAuthState: GmailAuthState?,
     stravaAuthState: StravaAuthState? = null,
+    healthConnectAuthState: HealthConnectAuthState? = null,
+    hevyAuthState: HevyAuthState? = null,
     onSave: (Tale) -> Unit,
     onBack: () -> Unit,
     modifier: Modifier = Modifier
@@ -164,11 +175,33 @@ fun CreateTaleScreen(
     var webhookUrl by remember { mutableStateOf(existingTale?.webhookUrl ?: "") }
     var searchQuery by remember { mutableStateOf(existingTale?.searchQuery ?: "") }
 
+    // Hydrate the "Append health data" toggle from the existing tale's
+    // reactions chain (if it had one). Falling back to false is safe — old
+    // tales without reactionsJson never had this option configured.
+    val initialReactions = remember(existingTale) {
+        ReactionCodec.decodeOrNull(existingTale?.reactionsJson) ?: emptyList()
+    }
+    var appendHealthData by remember(initialReactions) {
+        mutableStateOf(initialReactions.any { it is Reaction.GetHealthDataForWorkout })
+    }
+    var stravaTransform by remember(initialReactions) {
+        mutableStateOf(initialReactions.any { it is Reaction.StravaTransform })
+    }
+    var syncBiometricsToHevy by remember(initialReactions) {
+        mutableStateOf(initialReactions.any { it is Reaction.SyncBiometricsToHevy })
+    }
+
     val gmailAuthStatus by gmailAuthState?.authStatus?.collectAsState()
         ?: remember { mutableStateOf(GmailAuthStatus.NotSignedIn) }
 
     val stravaAuthStatus by stravaAuthState?.status?.collectAsState()
         ?: remember { mutableStateOf<StravaAuthStatus>(StravaAuthStatus.NotConfigured) }
+
+    val healthConnectStatus by healthConnectAuthState?.status?.collectAsState()
+        ?: remember { mutableStateOf<HealthConnectStatus>(HealthConnectStatus.Unavailable) }
+
+    val hevyAuthStatus by hevyAuthState?.status?.collectAsState()
+        ?: remember { mutableStateOf<HevyAuthStatus>(HevyAuthStatus.NotConfigured) }
 
     val context = LocalContext.current
 
@@ -177,6 +210,26 @@ fun CreateTaleScreen(
     // this screen wasn't visible).
     LaunchedEffect(stravaAuthState) {
         stravaAuthState?.refresh()
+    }
+
+    LaunchedEffect(healthConnectAuthState) {
+        healthConnectAuthState?.refresh()
+    }
+
+    LaunchedEffect(hevyAuthState) {
+        hevyAuthState?.refresh()
+    }
+
+    // Health Connect's permission grant is its own activity-result contract,
+    // not the standard Android runtime-permission API. The contract takes a
+    // Set<String> in (the requested permissions) and returns a Set<String>
+    // out (those granted). We just refresh after to update the displayed
+    // status — the StateFlow is read elsewhere.
+    val scope = rememberCoroutineScope()
+    val healthPermissionLauncher = rememberLauncherForActivityResult(
+        contract = PermissionController.createRequestPermissionResultContract()
+    ) { _: Set<String> ->
+        scope.launch { healthConnectAuthState?.refresh() }
     }
 
     val signInLauncher = rememberLauncherForActivityResult(
@@ -208,6 +261,9 @@ fun CreateTaleScreen(
         }
         ActionType.STRAVA_LAST_HEVY -> {
             stravaAuthStatus is StravaAuthStatus.SignedIn
+        }
+        ActionType.HEVY_LAST_WORKOUT -> {
+            hevyAuthStatus is HevyAuthStatus.Authorized
         }
     }
 
@@ -280,28 +336,43 @@ fun CreateTaleScreen(
                     style = MaterialTheme.typography.labelLarge,
                     color = Black
                 )
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    ActionTypeChip(
-                        label = "Fetch Time",
-                        selected = actionType == ActionType.TIME,
-                        onClick = { actionType = ActionType.TIME },
-                        modifier = Modifier.weight(1f)
-                    )
-                    ActionTypeChip(
-                        label = "Email Juggle",
-                        selected = actionType == ActionType.EMAIL_JUGGLE,
-                        onClick = { actionType = ActionType.EMAIL_JUGGLE },
-                        modifier = Modifier.weight(1f)
-                    )
-                    ActionTypeChip(
-                        label = "Strava Hevy",
-                        selected = actionType == ActionType.STRAVA_LAST_HEVY,
-                        onClick = { actionType = ActionType.STRAVA_LAST_HEVY },
-                        modifier = Modifier.weight(1f)
-                    )
+                // 2×2 grid — four labels too cramped at weight=1f each, and
+                // wrapping to two rows reads cleaner than a horizontal scroll.
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        ActionTypeChip(
+                            label = "Fetch Time",
+                            selected = actionType == ActionType.TIME,
+                            onClick = { actionType = ActionType.TIME },
+                            modifier = Modifier.weight(1f)
+                        )
+                        ActionTypeChip(
+                            label = "Email Juggle",
+                            selected = actionType == ActionType.EMAIL_JUGGLE,
+                            onClick = { actionType = ActionType.EMAIL_JUGGLE },
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        ActionTypeChip(
+                            label = "Strava Hevy",
+                            selected = actionType == ActionType.STRAVA_LAST_HEVY,
+                            onClick = { actionType = ActionType.STRAVA_LAST_HEVY },
+                            modifier = Modifier.weight(1f)
+                        )
+                        ActionTypeChip(
+                            label = "Hevy Workout",
+                            selected = actionType == ActionType.HEVY_LAST_WORKOUT,
+                            onClick = { actionType = ActionType.HEVY_LAST_WORKOUT },
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
                 }
             }
 
@@ -441,6 +512,14 @@ fun CreateTaleScreen(
                 )
             }
 
+            // Hevy specific options
+            if (actionType == ActionType.HEVY_LAST_WORKOUT) {
+                HevyAccountSection(
+                    hevyAuthState = hevyAuthState,
+                    hevyAuthStatus = hevyAuthStatus
+                )
+            }
+
             // Schedule type
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(
@@ -509,39 +588,89 @@ fun CreateTaleScreen(
                 }
             }
 
-            // Webhook URL input
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            // Reactions — what runs after the action.
+            //
+            // The action produces a payload; reactions augment or transmit it
+            // in order. Today the available reactions are "Append health data
+            // for the workout" (Strava-action only) and the webhook POST.
+            // Order on save: augmenters first, transmitters last.
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text(
-                    text = "Webhook URL",
+                    text = "Reactions",
                     style = MaterialTheme.typography.labelLarge,
                     color = Black
                 )
-                BasicTextField(
-                    value = webhookUrl,
-                    onValueChange = { webhookUrl = it },
-                    textStyle = MaterialTheme.typography.bodyLarge.copy(color = Black),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .border(1.dp, Gray200, RoundedCornerShape(8.dp))
-                        .padding(16.dp),
-                    decorationBox = { innerTextField ->
-                        Box {
-                            if (webhookUrl.isEmpty()) {
-                                Text(
-                                    text = "https://your-server.com/webhook",
-                                    style = MaterialTheme.typography.bodyLarge,
-                                    color = Gray500
-                                )
-                            }
-                            innerTextField()
-                        }
-                    }
-                )
                 Text(
-                    text = "Results will be POSTed to this URL as JSON",
+                    text = "Run after the action. Order: augment first, send last.",
                     style = MaterialTheme.typography.bodySmall,
                     color = Gray500
                 )
+
+                // Health-data augmenter is shared by both workout-action types.
+                if (actionType == ActionType.STRAVA_LAST_HEVY ||
+                    actionType == ActionType.HEVY_LAST_WORKOUT
+                ) {
+                    HealthDataReactionRow(
+                        enabled = appendHealthData,
+                        onToggle = { appendHealthData = it },
+                        status = healthConnectStatus,
+                        onRequestPermission = {
+                            val perms = healthConnectAuthState?.requiredPermissions
+                                ?: return@HealthDataReactionRow
+                            healthPermissionLauncher.launch(perms)
+                        }
+                    )
+                }
+
+                if (actionType == ActionType.STRAVA_LAST_HEVY) {
+                    StravaTransformReactionRow(
+                        enabled = stravaTransform,
+                        onToggle = { stravaTransform = it },
+                        healthDataEnabled = appendHealthData
+                    )
+                }
+
+                if (actionType == ActionType.HEVY_LAST_WORKOUT) {
+                    SyncBiometricsToHevyReactionRow(
+                        enabled = syncBiometricsToHevy,
+                        onToggle = { syncBiometricsToHevy = it },
+                        healthDataEnabled = appendHealthData
+                    )
+                }
+
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = "Webhook URL",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = Black
+                    )
+                    BasicTextField(
+                        value = webhookUrl,
+                        onValueChange = { webhookUrl = it },
+                        textStyle = MaterialTheme.typography.bodyLarge.copy(color = Black),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .border(1.dp, Gray200, RoundedCornerShape(8.dp))
+                            .padding(16.dp),
+                        decorationBox = { innerTextField ->
+                            Box {
+                                if (webhookUrl.isEmpty()) {
+                                    Text(
+                                        text = "https://your-server.com/webhook",
+                                        style = MaterialTheme.typography.bodyLarge,
+                                        color = Gray500
+                                    )
+                                }
+                                innerTextField()
+                            }
+                        }
+                    )
+                    Text(
+                        text = "Final payload (after any augmenters) is POSTed here as JSON. Leave blank to skip.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Gray500
+                    )
+                }
             }
 
             Spacer(modifier = Modifier.weight(1f))
@@ -555,20 +684,49 @@ fun CreateTaleScreen(
                         ScheduleType.DAILY_AT -> dailyTime
                     }
 
+                    val finalWebhookUrl = webhookUrl.ifBlank { null }
+                    val finalSearchQuery = if (actionType == ActionType.EMAIL_JUGGLE) {
+                        searchQuery.ifBlank { null }
+                    } else null
+
+                    // Build the reaction chain in canonical order: augmenters
+                    // first (so transmitters see the augmented payload), then
+                    // transport. Always serialize — even an empty list — so we
+                    // don't fall through to the legacy webhookUrl synthesis.
+                    val isWorkoutAction = actionType == ActionType.STRAVA_LAST_HEVY ||
+                        actionType == ActionType.HEVY_LAST_WORKOUT
+                    val reactions = buildList {
+                        if (isWorkoutAction && appendHealthData) {
+                            add(Reaction.GetHealthDataForWorkout)
+                        }
+                        if (actionType == ActionType.STRAVA_LAST_HEVY && stravaTransform) {
+                            add(Reaction.StravaTransform)
+                        }
+                        if (actionType == ActionType.HEVY_LAST_WORKOUT && syncBiometricsToHevy) {
+                            add(Reaction.SyncBiometricsToHevy)
+                        }
+                        if (finalWebhookUrl != null) {
+                            add(Reaction.Webhook(finalWebhookUrl))
+                        }
+                    }
+                    val finalReactionsJson = ReactionCodec.encode(reactions)
+
                     val tale = existingTale?.copy(
                         name = name,
                         actionType = actionType,
                         scheduleType = scheduleType,
                         scheduleValue = scheduleValue,
-                        webhookUrl = webhookUrl.ifBlank { null },
-                        searchQuery = if (actionType == ActionType.EMAIL_JUGGLE) searchQuery.ifBlank { null } else null
+                        webhookUrl = finalWebhookUrl,
+                        searchQuery = finalSearchQuery,
+                        reactionsJson = finalReactionsJson
                     ) ?: Tale(
                         name = name,
                         actionType = actionType,
                         scheduleType = scheduleType,
                         scheduleValue = scheduleValue,
-                        webhookUrl = webhookUrl.ifBlank { null },
-                        searchQuery = if (actionType == ActionType.EMAIL_JUGGLE) searchQuery.ifBlank { null } else null
+                        webhookUrl = finalWebhookUrl,
+                        searchQuery = finalSearchQuery,
+                        reactionsJson = finalReactionsJson
                     )
 
                     onSave(tale)
@@ -1153,6 +1311,386 @@ private fun StravaAuthorizeStep(
                 text = error,
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.error
+            )
+        }
+    }
+}
+
+@Composable
+private fun HealthDataReactionRow(
+    enabled: Boolean,
+    onToggle: (Boolean) -> Unit,
+    status: HealthConnectStatus,
+    onRequestPermission: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .border(1.dp, Gray200, RoundedCornerShape(8.dp))
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(2.dp)
+            ) {
+                Text(
+                    text = "Append health data",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = Black
+                )
+                Text(
+                    text = "Heart rate + calories from Health Connect, scoped to the workout window.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Gray500
+                )
+            }
+            Spacer(modifier = Modifier.size(12.dp))
+            Switch(
+                checked = enabled,
+                onCheckedChange = onToggle,
+                colors = SwitchDefaults.colors(
+                    checkedThumbColor = White,
+                    checkedTrackColor = Black,
+                    uncheckedThumbColor = White,
+                    uncheckedTrackColor = Gray200,
+                    uncheckedBorderColor = Gray200
+                )
+            )
+        }
+
+        // Only surface the permission/availability state when the user has
+        // actually opted in — otherwise it's noise.
+        if (enabled) {
+            when (status) {
+                is HealthConnectStatus.Granted -> {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Icon(
+                            Icons.Default.Check,
+                            contentDescription = null,
+                            tint = Green500,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Text(
+                            text = "Health Connect permissions granted",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Gray500
+                        )
+                    }
+                }
+                is HealthConnectStatus.NeedsPermission -> {
+                    OutlinedButton(
+                        onClick = onRequestPermission,
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        Text("Grant Health Connect permissions")
+                    }
+                }
+                is HealthConnectStatus.Unavailable -> {
+                    Text(
+                        text = "Health Connect isn't available on this device. Install the Health Connect app from the Play Store (Android <14) or enable it in Settings.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun StravaTransformReactionRow(
+    enabled: Boolean,
+    onToggle: (Boolean) -> Unit,
+    healthDataEnabled: Boolean
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .border(1.dp, Gray200, RoundedCornerShape(8.dp))
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(2.dp)
+            ) {
+                Text(
+                    text = "Strava Transform",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = Black
+                )
+                Text(
+                    text = "Re-uploads the workout as a new Strava activity with HR, calories, and the Hevy description baked into a TCX file. The original Hevy activity stays alongside, untouched.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Gray500
+                )
+            }
+            Spacer(modifier = Modifier.size(12.dp))
+            Switch(
+                checked = enabled,
+                onCheckedChange = onToggle,
+                colors = SwitchDefaults.colors(
+                    checkedThumbColor = White,
+                    checkedTrackColor = Black,
+                    uncheckedThumbColor = White,
+                    uncheckedTrackColor = Gray200,
+                    uncheckedBorderColor = Gray200
+                )
+            )
+        }
+        if (enabled && !healthDataEnabled) {
+            Text(
+                text = "Tip: enable \"Append health data\" above so the new activity has a real HR graph and calorie total. Without it the activity uploads but Strava reports has_heartrate: false.",
+                style = MaterialTheme.typography.bodySmall,
+                color = Gray500
+            )
+        }
+        if (enabled) {
+            Text(
+                text = "Requires Strava activity:write scope — sign out and re-authorize if your existing connection is read-only.",
+                style = MaterialTheme.typography.bodySmall,
+                color = Gray500
+            )
+        }
+    }
+}
+
+@Composable
+private fun HevyAccountSection(
+    hevyAuthState: HevyAuthState?,
+    hevyAuthStatus: HevyAuthStatus
+) {
+    val scope = rememberCoroutineScope()
+    val context = LocalContext.current
+
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text(
+            text = "Hevy Account",
+            style = MaterialTheme.typography.labelLarge,
+            color = Black
+        )
+
+        when (hevyAuthStatus) {
+            is HevyAuthStatus.NotConfigured, is HevyAuthStatus.Error -> {
+                HevyCredentialsForm(
+                    onSave = { devKey, cookieJson ->
+                        hevyAuthState?.saveDevApiKey(devKey)
+                        scope.launch {
+                            val err = hevyAuthState?.saveAuthCookieAndVerify(cookieJson)
+                            if (err != null) {
+                                Toast.makeText(context, err, Toast.LENGTH_LONG).show()
+                            }
+                        }
+                    },
+                    error = (hevyAuthStatus as? HevyAuthStatus.Error)?.message
+                )
+            }
+            is HevyAuthStatus.Verifying -> {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .border(1.dp, Gray200, RoundedCornerShape(8.dp))
+                        .padding(16.dp),
+                    horizontalArrangement = Arrangement.Center,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(20.dp),
+                        strokeWidth = 2.dp,
+                        color = Black
+                    )
+                    Spacer(modifier = Modifier.size(8.dp))
+                    Text("Verifying with Hevy...", color = Gray500)
+                }
+            }
+            is HevyAuthStatus.Authorized -> {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .border(1.dp, Green500, RoundedCornerShape(8.dp))
+                        .padding(16.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            Icons.Default.Check,
+                            contentDescription = null,
+                            tint = Green500,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Text(
+                            text = hevyAuthStatus.username ?: "Connected",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = Black
+                        )
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Text(
+                            text = "Sign out",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = Gray500,
+                            modifier = Modifier.clickable { hevyAuthState?.signOut() }
+                        )
+                        Text(
+                            text = "Reset",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = Gray500,
+                            modifier = Modifier.clickable { hevyAuthState?.clearAll() }
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun HevyCredentialsForm(
+    onSave: (devKey: String, cookieJson: String) -> Unit,
+    error: String?
+) {
+    var devKey by remember { mutableStateOf("") }
+    var cookieJson by remember { mutableStateOf("") }
+
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text(
+            text = "Hevy needs two pieces, both stored encrypted on this device only:\n\n" +
+                "1. Developer API key — get one from your Hevy account → Developer page (used for V1 listing).\n" +
+                "2. auth2.0-token cookie — log in at app.hevyapp.com, open DevTools → Application → Cookies → hevy.com → copy the value of \"auth2.0-token\" (it's URL-encoded JSON; paste verbatim).",
+            style = MaterialTheme.typography.bodySmall,
+            color = Gray500
+        )
+        BasicTextField(
+            value = devKey,
+            onValueChange = { devKey = it },
+            singleLine = true,
+            textStyle = MaterialTheme.typography.bodyLarge.copy(color = Black),
+            modifier = Modifier
+                .fillMaxWidth()
+                .border(1.dp, Gray200, RoundedCornerShape(8.dp))
+                .padding(16.dp),
+            decorationBox = { innerTextField ->
+                Box {
+                    if (devKey.isEmpty()) {
+                        Text(
+                            text = "Hevy developer API key",
+                            style = MaterialTheme.typography.bodyLarge,
+                            color = Gray500
+                        )
+                    }
+                    innerTextField()
+                }
+            }
+        )
+        BasicTextField(
+            value = cookieJson,
+            onValueChange = { cookieJson = it },
+            textStyle = MaterialTheme.typography.bodyLarge.copy(color = Black),
+            modifier = Modifier
+                .fillMaxWidth()
+                .border(1.dp, Gray200, RoundedCornerShape(8.dp))
+                .padding(16.dp),
+            decorationBox = { innerTextField ->
+                Box {
+                    if (cookieJson.isEmpty()) {
+                        Text(
+                            text = "auth2.0-token cookie value",
+                            style = MaterialTheme.typography.bodyLarge,
+                            color = Gray500
+                        )
+                    }
+                    innerTextField()
+                }
+            }
+        )
+        OutlinedButton(
+            onClick = { onSave(devKey, cookieJson) },
+            enabled = devKey.isNotBlank() && cookieJson.isNotBlank(),
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(8.dp)
+        ) {
+            Text("Save & verify")
+        }
+        if (error != null) {
+            Text(
+                text = error,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error
+            )
+        }
+    }
+}
+
+@Composable
+private fun SyncBiometricsToHevyReactionRow(
+    enabled: Boolean,
+    onToggle: (Boolean) -> Unit,
+    healthDataEnabled: Boolean
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .border(1.dp, Gray200, RoundedCornerShape(8.dp))
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(2.dp)
+            ) {
+                Text(
+                    text = "Sync biometrics to Hevy",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = Black
+                )
+                Text(
+                    text = "Recreates the Hevy workout with HR + calories + share_to_strava=true. Hevy auto-pushes the result to Strava with native HR graph and photo. The old Hevy workout is deleted; the orphaned old Strava activity will be cleaned up by a follow-up reaction (TBD).",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Gray500
+                )
+            }
+            Spacer(modifier = Modifier.size(12.dp))
+            Switch(
+                checked = enabled,
+                onCheckedChange = onToggle,
+                colors = SwitchDefaults.colors(
+                    checkedThumbColor = White,
+                    checkedTrackColor = Black,
+                    uncheckedThumbColor = White,
+                    uncheckedTrackColor = Gray200,
+                    uncheckedBorderColor = Gray200
+                )
+            )
+        }
+        if (enabled && !healthDataEnabled) {
+            Text(
+                text = "Tip: enable \"Append health data\" above so the recreated workout actually has biometrics — otherwise this is a no-op.",
+                style = MaterialTheme.typography.bodySmall,
+                color = Gray500
             )
         }
     }

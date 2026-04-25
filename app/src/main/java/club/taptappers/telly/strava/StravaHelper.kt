@@ -2,13 +2,17 @@ package club.taptappers.telly.strava
 
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import okhttp3.FormBody
 import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.TimeUnit
@@ -152,6 +156,164 @@ class StravaHelper @Inject constructor(
         }
     }
 
+    /**
+     * Result of a successful TCX upload + processing.
+     *
+     * - [Created]: a fresh activity was created from this upload.
+     * - [Duplicate]: Strava recognized this external_id as a previous upload
+     *   and returned the existing [activityId] without creating a new one.
+     *   Idempotent re-runs land here.
+     * - [Pending]: the upload was accepted but Strava is still processing it.
+     *   Treated as a non-fatal "try again later" — the caller can record the
+     *   upload_id and we'll pick up the activity on the next chain run.
+     */
+    sealed class UploadOutcome {
+        data class Created(val activityId: Long) : UploadOutcome()
+        data class Duplicate(val activityId: Long) : UploadOutcome()
+        data class Pending(val uploadId: Long) : UploadOutcome()
+    }
+
+    /**
+     * Uploads a TCX file as a new activity. Polls the upload-status endpoint
+     * until the activity is processed (or the timeout fires). Strava
+     * deduplicates by [externalId] — re-uploading the same external_id
+     * returns [UploadOutcome.Duplicate] with the original activity_id.
+     */
+    suspend fun uploadActivity(
+        tcxContent: String,
+        name: String,
+        description: String,
+        externalId: String,
+        pollTimeoutMs: Long = 60_000L
+    ): UploadOutcome = withContext(Dispatchers.IO) {
+        val token = validAccessToken()
+
+        val multipart = MultipartBody.Builder()
+            .setType(MultipartBody.FORM)
+            .addFormDataPart("data_type", "tcx")
+            .addFormDataPart("name", name)
+            .addFormDataPart("description", description)
+            .addFormDataPart("external_id", externalId)
+            .addFormDataPart(
+                name = "file",
+                filename = "telly-$externalId.tcx",
+                body = tcxContent.toRequestBody("application/xml".toMediaType())
+            )
+            .build()
+
+        val request = Request.Builder()
+            .url(UPLOAD_URL)
+            .header("Authorization", "Bearer $token")
+            .post(multipart)
+            .build()
+
+        val initial = httpClient.newCall(request).execute().use { resp ->
+            val body = resp.body?.string().orEmpty()
+            if (!resp.isSuccessful) {
+                throw RuntimeException("Upload ${resp.code}: ${body.take(300)}")
+            }
+            JSONObject(body)
+        }
+
+        // Strava reports duplicate detection as an "error" string on the
+        // initial response, with the existing activity_id sometimes embedded.
+        // We treat this as success.
+        classifyUpload(initial)?.let { return@withContext it }
+
+        val uploadId = initial.getLong("id")
+        pollUpload(uploadId, token, pollTimeoutMs)
+    }
+
+    private suspend fun pollUpload(
+        uploadId: Long,
+        token: String,
+        timeoutMs: Long
+    ): UploadOutcome = withContext(Dispatchers.IO) {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        var delayMs = 1_000L
+        while (System.currentTimeMillis() < deadline) {
+            delay(delayMs)
+            // Linear backoff: 1s, 2s, 3s, capped at 5s. Strava processing is
+            // usually done within a few seconds.
+            delayMs = (delayMs + 1_000L).coerceAtMost(5_000L)
+
+            val pollRequest = Request.Builder()
+                .url("$UPLOAD_URL/$uploadId")
+                .header("Authorization", "Bearer $token")
+                .build()
+
+            val json = httpClient.newCall(pollRequest).execute().use { resp ->
+                val body = resp.body?.string().orEmpty()
+                if (!resp.isSuccessful) {
+                    throw RuntimeException("Upload poll ${resp.code}: ${body.take(300)}")
+                }
+                JSONObject(body)
+            }
+
+            classifyUpload(json)?.let { return@withContext it }
+        }
+        UploadOutcome.Pending(uploadId)
+    }
+
+    /**
+     * Maps an upload-status JSON to an outcome, or null if it's still being
+     * processed and we should keep polling.
+     */
+    private fun classifyUpload(json: JSONObject): UploadOutcome? {
+        val activityIdRaw = if (json.isNull("activity_id")) 0L else json.optLong("activity_id", 0L)
+        val error = json.optString("error", "").takeIf { it.isNotBlank() && it != "null" }
+
+        if (error != null) {
+            // Strava signals duplicates with a message like:
+            //   "duplicate of activity 18253002807"
+            // The activity_id field is sometimes populated, sometimes not.
+            if (error.contains("duplicate", ignoreCase = true)) {
+                val parsed = DUPLICATE_ID_REGEX.find(error)?.groupValues?.getOrNull(1)?.toLongOrNull()
+                val finalId = parsed ?: activityIdRaw.takeIf { it > 0L }
+                if (finalId != null) return UploadOutcome.Duplicate(finalId)
+                // Duplicate but no id we can recover — treat as a hard error so
+                // the caller logs it, since silently dropping would mask issues.
+                throw RuntimeException("Duplicate upload but no activity_id returned: $error")
+            }
+            throw RuntimeException("Upload error: $error")
+        }
+
+        if (activityIdRaw > 0L) return UploadOutcome.Created(activityIdRaw)
+        return null
+    }
+
+    /**
+     * PUTs an UpdatableActivity. Strava only accepts the documented subset of
+     * fields here — sport_type is the one we need most, since TCX uploads land
+     * as generic "Workout" and we want WeightTraining (or whatever the
+     * original Hevy activity was).
+     */
+    suspend fun updateActivity(
+        activityId: Long,
+        sportType: String? = null,
+        name: String? = null,
+        description: String? = null
+    ): Unit = withContext(Dispatchers.IO) {
+        val token = validAccessToken()
+        val body = FormBody.Builder().apply {
+            if (sportType != null) add("sport_type", sportType)
+            if (name != null) add("name", name)
+            if (description != null) add("description", description)
+        }.build()
+
+        val request = Request.Builder()
+            .url("$ACTIVITY_URL_PREFIX$activityId")
+            .header("Authorization", "Bearer $token")
+            .put(body)
+            .build()
+        httpClient.newCall(request).execute().use { resp ->
+            if (!resp.isSuccessful) {
+                val errBody = resp.body?.string().orEmpty()
+                throw RuntimeException("Update ${resp.code}: ${errBody.take(300)}")
+            }
+        }
+    }
+
     fun signOut() {
         secrets.clearTokens()
     }
@@ -230,9 +392,13 @@ class StravaHelper @Inject constructor(
         private const val TOKEN_URL = "https://www.strava.com/api/v3/oauth/token"
         private const val LIST_URL = "https://www.strava.com/api/v3/athlete/activities"
         private const val DETAIL_URL_PREFIX = "https://www.strava.com/api/v3/activities/"
+        private const val ACTIVITY_URL_PREFIX = "https://www.strava.com/api/v3/activities/"
+        private const val UPLOAD_URL = "https://www.strava.com/api/v3/uploads"
         private const val REDIRECT_URI = "http://localhost/exchange_token"
-        private const val SCOPE = "activity:read_all"
+        private const val SCOPE = "activity:read_all,activity:write"
         private const val HEVY_DEVICE_NAME = "Hevy"
+
+        private val DUPLICATE_ID_REGEX = Regex("activity (\\d+)")
 
         // Refresh if the token expires within this many seconds of "now". One
         // minute is plenty — a single API call won't outlive that window.

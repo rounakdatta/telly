@@ -12,6 +12,7 @@ hiltNavigationCompose = "1.2.0"
 navigationCompose = "2.8.2"
 okhttp = "4.12.0"
 securityCrypto = "1.1.0-alpha06"
+healthConnect = "1.1.0-alpha10"
 playServicesAuth = "21.2.0"
 googleApiClient = "2.7.0"
 gmailApi = "v1-rev20231218-2.0.0"
@@ -45,6 +46,9 @@ okhttp = { group = "com.squareup.okhttp3", name = "okhttp", version.ref = "okhtt
 
 # Security (encrypted prefs for OAuth secrets)
 androidx-security-crypto = { group = "androidx.security", name = "security-crypto", version.ref = "securityCrypto" }
+
+# Health Connect (read HR + calorie samples for workout windows)
+androidx-health-connect-client = { group = "androidx.health.connect", name = "connect-client", version.ref = "healthConnect" }
 
 # Google/Gmail
 play-services-auth = { group = "com.google.android.gms", name = "play-services-auth", version.ref = "playServicesAuth" }

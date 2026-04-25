@@ -201,6 +201,7 @@ fun TaleDetailScreen(
                             ActionType.TIME -> "Fetch Time"
                             ActionType.EMAIL_JUGGLE -> "Email Juggle"
                             ActionType.STRAVA_LAST_HEVY -> "Strava (Hevy)"
+                            ActionType.HEVY_LAST_WORKOUT -> "Hevy Workout"
                         },
                         style = MaterialTheme.typography.bodyLarge,
                         color = Gray500
