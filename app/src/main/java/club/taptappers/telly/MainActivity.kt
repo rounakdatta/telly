@@ -150,7 +150,8 @@ fun TellyApp(
                 onBack = { navController.popBackStack() },
                 gmailAuthState = gmailAuthState,
                 stravaAuthState = stravaAuthState,
-                healthConnectAuthState = healthConnectAuthState
+                healthConnectAuthState = healthConnectAuthState,
+                hevyAuthState = hevyAuthState
             )
         }
 
