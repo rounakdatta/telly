@@ -56,7 +56,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.health.connect.client.PermissionController
@@ -1588,6 +1590,8 @@ private fun HevyCredentialsForm(
     onSave: (devKey: String, cookieValue: String) -> Unit,
     error: String?
 ) {
+    val context = LocalContext.current
+    val clipboard = LocalClipboardManager.current
     var devKey by remember { mutableStateOf("") }
     var cookieValue by remember { mutableStateOf("") }
 
@@ -1595,12 +1599,19 @@ private fun HevyCredentialsForm(
         Text(
             text = "Both stored encrypted on this device only:\n\n" +
                 "1. Developer API key — Hevy account → Developer page.\n" +
-                "2. auth2.0-token cookie value — log into app.hevyapp.com on a desktop " +
-                "browser (Google sign-in works), open DevTools → Application → Cookies → " +
-                "hevy.com → copy the value of \"auth2.0-token\". Paste verbatim; we accept " +
-                "it URL-encoded or as raw JSON.",
+                "2. auth2.0-token — sign in to app.hevyapp.com on a desktop browser " +
+                "(Google sign-in works), then run the snippet below in DevTools console " +
+                "(Cmd+Opt+J on Mac, F12 on Windows). It copies the token to your clipboard; " +
+                "AirDrop / Universal Clipboard to your phone, then paste below.",
             style = MaterialTheme.typography.bodySmall,
             color = Gray500
+        )
+        SnippetCopyBlock(
+            snippet = HEVY_COOKIE_SNIPPET,
+            onCopy = {
+                clipboard.setText(AnnotatedString(HEVY_COOKIE_SNIPPET))
+                Toast.makeText(context, "Snippet copied", Toast.LENGTH_SHORT).show()
+            }
         )
         BasicTextField(
             value = devKey,
@@ -1660,6 +1671,46 @@ private fun HevyCredentialsForm(
                 color = MaterialTheme.colorScheme.error
             )
         }
+    }
+}
+
+/**
+ * One-liner the user can paste into the DevTools console on app.hevyapp.com
+ * after signing in. Reads the `auth2.0-token` cookie (URL-decoded) and puts
+ * the JSON on their clipboard via DevTools' built-in `copy()` helper.
+ * Returns `undefined` in the console — that's expected for `copy()`.
+ */
+private const val HEVY_COOKIE_SNIPPET =
+    "copy(decodeURIComponent(document.cookie.match(/auth2\\.0-token=([^;]+)/)[1]))"
+
+@Composable
+private fun SnippetCopyBlock(
+    snippet: String,
+    onCopy: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .border(1.dp, Gray200, RoundedCornerShape(8.dp))
+            .background(Gray100, RoundedCornerShape(8.dp))
+            .clickable(onClick = onCopy)
+            .padding(12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Text(
+            text = snippet,
+            style = MaterialTheme.typography.bodySmall.copy(
+                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+            ),
+            color = Black,
+            modifier = Modifier.weight(1f)
+        )
+        Text(
+            text = "Copy",
+            style = MaterialTheme.typography.labelMedium,
+            color = Gray500
+        )
     }
 }
 
