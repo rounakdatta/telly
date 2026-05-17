@@ -71,7 +71,6 @@ import club.taptappers.telly.health.HealthConnectAuthState
 import club.taptappers.telly.health.HealthConnectStatus
 import club.taptappers.telly.hevy.HevyAuthState
 import club.taptappers.telly.hevy.HevyAuthStatus
-import club.taptappers.telly.hevy.HevyWebLoginActivity
 import club.taptappers.telly.strava.StravaAuthState
 import club.taptappers.telly.strava.StravaAuthStatus
 import club.taptappers.telly.ui.theme.Black
@@ -1476,19 +1475,8 @@ private fun HevyAccountSection(
     hevyAuthState: HevyAuthState?,
     hevyAuthStatus: HevyAuthStatus
 ) {
+    val scope = rememberCoroutineScope()
     val context = LocalContext.current
-
-    // Launches HevyWebLoginActivity. The activity itself persists tokens via
-    // the shared HevyAuthState (singleton), so the StateFlow this section
-    // observes will already reflect Authorized/Error by the time we get the
-    // result here — the callback only handles the cancel case.
-    val webLoginLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.StartActivityForResult()
-    ) { result ->
-        if (result.resultCode != Activity.RESULT_OK) {
-            Toast.makeText(context, "Hevy login cancelled", Toast.LENGTH_SHORT).show()
-        }
-    }
 
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text(
@@ -1500,7 +1488,7 @@ private fun HevyAccountSection(
         when (hevyAuthStatus) {
             is HevyAuthStatus.NotConfigured, is HevyAuthStatus.Error -> {
                 HevyCredentialsForm(
-                    onSave = { devKey ->
+                    onSave = { devKey, cookieValue ->
                         if (hevyAuthState == null) {
                             Toast.makeText(
                                 context,
@@ -1509,12 +1497,25 @@ private fun HevyAccountSection(
                             ).show()
                             return@HevyCredentialsForm
                         }
-                        // Persist the dev key first so it survives even if the
-                        // user backs out of the WebView mid-login.
                         hevyAuthState.saveDevApiKey(devKey)
-                        webLoginLauncher.launch(
-                            Intent(context, HevyWebLoginActivity::class.java)
-                        )
+                        scope.launch {
+                            try {
+                                val err = hevyAuthState.handleWebLoginCookie(cookieValue)
+                                if (err != null) {
+                                    Toast.makeText(context, "Hevy: $err", Toast.LENGTH_LONG).show()
+                                } else {
+                                    Toast.makeText(context, "Hevy: signed in", Toast.LENGTH_SHORT).show()
+                                }
+                            } catch (e: Exception) {
+                                android.util.Log.e("Telly", "Hevy paste-token coroutine threw", e)
+                                Toast.makeText(
+                                    context,
+                                    "Hevy crash: ${e.javaClass.simpleName}: ${e.message}",
+                                    Toast.LENGTH_LONG
+                                ).show()
+                                hevyAuthState.refresh()
+                            }
+                        }
                     },
                     error = (hevyAuthStatus as? HevyAuthStatus.Error)?.message
                 )
@@ -1584,18 +1585,20 @@ private fun HevyAccountSection(
 
 @Composable
 private fun HevyCredentialsForm(
-    onSave: (devKey: String) -> Unit,
+    onSave: (devKey: String, cookieValue: String) -> Unit,
     error: String?
 ) {
     var devKey by remember { mutableStateOf("") }
+    var cookieValue by remember { mutableStateOf("") }
 
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text(
-            text = "Hevy needs two pieces, both stored encrypted on this device only:\n\n" +
-                "1. Developer API key — Hevy account → Developer page (used for V1 listing).\n" +
-                "2. A web sign-in to Hevy — opens Hevy's real login page in a WebView " +
-                "(handles reCAPTCHA natively). Telly never sees your password; only the " +
-                "OAuth tokens Hevy issues are persisted.",
+            text = "Both stored encrypted on this device only:\n\n" +
+                "1. Developer API key — Hevy account → Developer page.\n" +
+                "2. auth2.0-token cookie value — log into app.hevyapp.com on a desktop " +
+                "browser (Google sign-in works), open DevTools → Application → Cookies → " +
+                "hevy.com → copy the value of \"auth2.0-token\". Paste verbatim; we accept " +
+                "it URL-encoded or as raw JSON.",
             style = MaterialTheme.typography.bodySmall,
             color = Gray500
         )
@@ -1621,13 +1624,34 @@ private fun HevyCredentialsForm(
                 }
             }
         )
+        BasicTextField(
+            value = cookieValue,
+            onValueChange = { cookieValue = it },
+            textStyle = MaterialTheme.typography.bodyLarge.copy(color = Black),
+            modifier = Modifier
+                .fillMaxWidth()
+                .border(1.dp, Gray200, RoundedCornerShape(8.dp))
+                .padding(16.dp),
+            decorationBox = { innerTextField ->
+                Box {
+                    if (cookieValue.isEmpty()) {
+                        Text(
+                            text = "auth2.0-token cookie value",
+                            style = MaterialTheme.typography.bodyLarge,
+                            color = Gray500
+                        )
+                    }
+                    innerTextField()
+                }
+            }
+        )
         OutlinedButton(
-            onClick = { onSave(devKey) },
-            enabled = devKey.isNotBlank(),
+            onClick = { onSave(devKey, cookieValue) },
+            enabled = devKey.isNotBlank() && cookieValue.isNotBlank(),
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(8.dp)
         ) {
-            Text("Sign in with Hevy")
+            Text("Save & verify")
         }
         if (error != null) {
             Text(
