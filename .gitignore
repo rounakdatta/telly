@@ -37,6 +37,11 @@ obj/
 # Keystore files
 *.jks
 *.keystore
+# Exception: the debug keystore is intentionally committed so every CI build
+# (and yours locally) signs APKs with the same cert. Without it, every CI
+# build produces an APK that conflicts with the installed app on update.
+# The keystore uses Android's well-known debug defaults — not sensitive.
+!app/debug.keystore
 
 # External native build folder
 .externalNativeBuild/

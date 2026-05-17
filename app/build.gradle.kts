@@ -20,6 +20,22 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    // Pin the debug signing config to a keystore checked into the repo so
+    // every build (local + CI) produces an APK signed with the same cert.
+    // Without this, GitHub Actions generates a fresh debug.keystore per run
+    // and Android refuses to update across signatures, forcing a full
+    // uninstall (= losing all tales + tokens) for every release. The
+    // credentials below are Android's well-known debug defaults — not
+    // sensitive, identical to what Android Studio generates locally.
+    signingConfigs {
+        getByName("debug") {
+            storeFile = file("debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
