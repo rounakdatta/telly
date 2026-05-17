@@ -230,6 +230,23 @@ class ReactionRunner @Inject constructor(
             ?.optDouble("kcal", 0.0)
             ?: 0.0
         if (hrSamples.length() == 0 && totalCalories <= 0.0) {
+            // Two reasons we land here:
+            //   a) GetHealthDataForWorkout reaction wasn't enabled, so we never
+            //      tried to fetch HC data. We don't mark processed — user can
+            //      enable HC and retry.
+            //   b) HC was queried but the workout's window had no samples
+            //      (user didn't wear the watch, watch was charging, etc.).
+            //      Mark this workout as processed so the backfill scan doesn't
+            //      keep picking it as the candidate forever.
+            val hadHcRead = data.optJSONObject("health") != null
+            if (hadHcRead) {
+                hevy.markWorkoutProcessed(workoutId)
+                data.put("hevy_sync", JSONObject()
+                    .put("status", "skipped_no_hc_data")
+                    .put("workout_id", workoutId)
+                    .put("note", "Marked as processed; backfill scan won't re-pick this workout."))
+                return "skipped — no HC data for window; marked $workoutId processed"
+            }
             return "skipped (no HR or calories — run GetHealthDataForWorkout first)"
         }
 
@@ -266,13 +283,24 @@ class ReactionRunner @Inject constructor(
         // ---------------------------------------------------------------
         val verifiedHrCount = verifyNewWorkoutHasBiometrics(newWorkoutId)
         if (verifiedHrCount == null) {
+            // The new workout exists but is missing the biometrics we sent —
+            // a broken state we should clean up rather than leave around. Delete
+            // ONLY the new (failed) duplicate; the original is untouched, so the
+            // user keeps their workout and the next run can retry.
+            val newDeleteResult = try {
+                hevy.deleteWorkoutV2(newWorkoutId)
+                "deleted"
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to delete failed-duplicate $newWorkoutId", e)
+                "delete_failed: ${e.message}"
+            }
             recordAbort(
                 data, workoutId, oldStartIso,
                 reason = "verify_failed",
-                detail = "GET /workout/$newWorkoutId did not show biometrics within retry window",
+                detail = "GET /workout/$newWorkoutId did not show biometrics within retry window; new duplicate $newDeleteResult",
                 newWorkoutId = newWorkoutId
             )
-            return "ABORTED: new workout $newWorkoutId did not surface biometrics on verify; OLD HEVY WORKOUT NOT DELETED"
+            return "ABORTED: new workout $newWorkoutId had no biometrics; new duplicate $newDeleteResult; OLD UNTOUCHED"
         }
 
         // ---------------------------------------------------------------
@@ -358,9 +386,9 @@ class ReactionRunner @Inject constructor(
             .put("abort_reason", reason)
             .put("old_workout_id", oldWorkoutId)
             .put("old_workout_start_time", oldStartIso)
-            .put("note", "Old Hevy workout intentionally NOT deleted — verify manually before retry.")
+            .put("note", "Original Hevy workout intentionally untouched — next run can retry.")
         if (detail != null) obj.put("detail", detail)
-        if (newWorkoutId != null) obj.put("new_workout_id_unverified", newWorkoutId)
+        if (newWorkoutId != null) obj.put("failed_duplicate_id", newWorkoutId)
         data.put("hevy_sync", obj)
     }
 

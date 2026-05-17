@@ -5,6 +5,7 @@ import android.content.SharedPreferences
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 import dagger.hilt.android.qualifiers.ApplicationContext
+import org.json.JSONArray
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -70,6 +71,52 @@ class HevySecrets @Inject constructor(
             prefs.edit().putString(KEY_USERNAME, value).apply()
         }
 
+    /**
+     * Workout IDs we've already examined and won't re-enrich, persisted across
+     * runs. Two reasons a workout lands here:
+     *   1. It already had biometrics natively when we first saw it (no work needed)
+     *   2. We tried to enrich it but Health Connect had no HR data for that window
+     *      (so re-trying would just keep failing the same way)
+     *
+     * Workouts we *successfully* enrich are NOT added here — the old Hevy id
+     * is deleted anyway, and the new one carries biometrics so future scans
+     * skip it naturally on the biometrics check. Workouts where enrichment
+     * fails mid-flight are NOT added either, so the next run can retry.
+     */
+    val processedWorkoutIds: Set<String>
+        get() = prefs.getString(KEY_PROCESSED_IDS, null)
+            ?.let {
+                try { JSONArray(it).let { arr ->
+                    buildSet(arr.length()) {
+                        for (i in 0 until arr.length()) add(arr.getString(i))
+                    }
+                } } catch (_: Exception) { emptySet() }
+            } ?: emptySet()
+
+    fun isProcessed(id: String): Boolean = id in processedWorkoutIds
+
+    fun markProcessed(id: String) {
+        if (id.isBlank()) return
+        val current = processedWorkoutIds
+        if (id in current) return
+        persistProcessed(current + id)
+    }
+
+    fun markProcessedBulk(ids: Collection<String>) {
+        val toAdd = ids.filter { it.isNotBlank() }
+        if (toAdd.isEmpty()) return
+        val current = processedWorkoutIds
+        val merged = current + toAdd
+        if (merged.size == current.size) return
+        persistProcessed(merged)
+    }
+
+    private fun persistProcessed(ids: Set<String>) {
+        val arr = JSONArray()
+        for (id in ids) arr.put(id)
+        prefs.edit().putString(KEY_PROCESSED_IDS, arr.toString()).commit()
+    }
+
     fun hasDevApiKey(): Boolean = !devApiKey.isNullOrBlank()
     fun hasTokens(): Boolean = !accessToken.isNullOrBlank() && !refreshToken.isNullOrBlank()
     fun isAuthorized(): Boolean = hasDevApiKey() && hasTokens()
@@ -102,6 +149,10 @@ class HevySecrets @Inject constructor(
         prefs.edit().clear().commit()
     }
 
+    fun clearProcessed() {
+        prefs.edit().remove(KEY_PROCESSED_IDS).commit()
+    }
+
     companion object {
         private const val FILE_NAME = "telly_hevy_secrets"
         private const val KEY_DEV_API_KEY = "dev_api_key"
@@ -109,5 +160,6 @@ class HevySecrets @Inject constructor(
         private const val KEY_REFRESH_TOKEN = "refresh_token"
         private const val KEY_EXPIRES_AT_ISO = "expires_at_iso"
         private const val KEY_USERNAME = "username"
+        private const val KEY_PROCESSED_IDS = "processed_workout_ids"
     }
 }

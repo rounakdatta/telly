@@ -158,31 +158,117 @@ class HevyHelper @Inject constructor(
     // -------- V1 surface (documented; user-keyed) --------
 
     /**
-     * Lists the most recent workouts using the documented V1 endpoint (so we
-     * don't depend on an undocumented "list" endpoint via V2). Caller is
-     * responsible for picking the latest by `start_time`.
+     * Lists a specific page of workouts using the documented V1 endpoint.
+     * Caller is responsible for picking the latest by `start_time` or
+     * paginating across pages.
      */
-    suspend fun listLatestWorkoutsV1(pageSize: Int = 5): JSONObject = withContext(Dispatchers.IO) {
-        val devKey = secrets.devApiKey
-            ?: throw IllegalStateException("Hevy developer API key not configured")
+    suspend fun listWorkoutsV1(page: Int = 1, pageSize: Int = 10): JSONObject =
+        withContext(Dispatchers.IO) {
+            val devKey = secrets.devApiKey
+                ?: throw IllegalStateException("Hevy developer API key not configured")
 
-        val url = "$BASE_URL/v1/workouts".toHttpUrl().newBuilder()
-            .addQueryParameter("page", "1")
-            .addQueryParameter("pageSize", pageSize.toString())
-            .build()
-        val req = Request.Builder()
-            .url(url)
-            .header("api-key", devKey)
-            .header("Accept", "application/json")
-            .build()
-        httpClient.newCall(req).execute().use { resp ->
-            val body = resp.body?.string().orEmpty()
-            if (!resp.isSuccessful) {
-                throw RuntimeException("Hevy V1 list ${resp.code}: ${body.take(300)}")
+            val url = "$BASE_URL/v1/workouts".toHttpUrl().newBuilder()
+                .addQueryParameter("page", page.toString())
+                .addQueryParameter("pageSize", pageSize.toString())
+                .build()
+            val req = Request.Builder()
+                .url(url)
+                .header("api-key", devKey)
+                .header("Accept", "application/json")
+                .build()
+            httpClient.newCall(req).execute().use { resp ->
+                val body = resp.body?.string().orEmpty()
+                if (!resp.isSuccessful) {
+                    throw RuntimeException("Hevy V1 list ${resp.code}: ${body.take(300)}")
+                }
+                JSONObject(body)
             }
-            JSONObject(body)
         }
+
+    /**
+     * Bundle the action returns after scanning the workout history: the
+     * winning candidate to enrich, plus IDs of workouts the scan discovered
+     * already had biometrics (caller persists these to skip them on future
+     * runs).
+     */
+    data class EnrichmentCandidate(
+        val workoutId: String,
+        val v1: JSONObject,
+        val v2: JSONObject,
+        /** Already-enriched IDs surfaced during the scan; caller should persist. */
+        val newlyDiscoveredEnriched: Set<String>
+    )
+
+    /**
+     * Walks the user's workout history newest-to-oldest, skipping anything in
+     * [skipIds] (the processed-IDs set), V2-fetching each candidate, and
+     * returning the first one without biometrics. Hard-capped at
+     * `maxPages * pageSize` candidates examined per run so we don't tail-scan
+     * the entire account on every invocation.
+     *
+     * Returns null when the scan window is exhausted with everything either
+     * already-skipped or already-biometric'd — meaning there's nothing to
+     * backfill within reach.
+     */
+    suspend fun findNextWorkoutNeedingEnrichment(
+        skipIds: Set<String>,
+        pageSize: Int = 10,
+        maxPages: Int = 10
+    ): EnrichmentCandidate? = withContext(Dispatchers.IO) {
+        val discoveredEnriched = mutableSetOf<String>()
+        for (page in 1..maxPages) {
+            val list = listWorkoutsV1(page = page, pageSize = pageSize)
+            val workouts = list.optJSONArray("workouts") ?: return@withContext null
+            if (workouts.length() == 0) return@withContext null
+
+            for (i in 0 until workouts.length()) {
+                val v1 = workouts.optJSONObject(i) ?: continue
+                val id = v1.optString("id").takeIf { it.isNotBlank() } ?: continue
+                if (id in skipIds) continue
+                if (id in discoveredEnriched) continue
+
+                val v2 = try {
+                    getWorkoutV2(id)
+                } catch (e: Exception) {
+                    Log.w(TAG, "scan: V2 fetch for $id failed, skipping", e)
+                    continue
+                }
+                val hrSamples = v2.optJSONObject("biometrics")
+                    ?.optJSONArray("heart_rate_samples")
+                if (hrSamples != null && hrSamples.length() > 0) {
+                    // Already enriched (natively or by an earlier Telly run that
+                    // we don't have on record yet) — remember so we don't
+                    // re-V2-fetch this id on the next scan.
+                    discoveredEnriched.add(id)
+                    continue
+                }
+
+                return@withContext EnrichmentCandidate(
+                    workoutId = id,
+                    v1 = v1,
+                    v2 = v2,
+                    newlyDiscoveredEnriched = discoveredEnriched.toSet()
+                )
+            }
+
+            // If we got fewer than pageSize, we've hit the end of the list.
+            if (workouts.length() < pageSize) break
+        }
+        return@withContext null
     }
+
+    /** Used by the SyncBiometricsToHevy reaction to mark workouts permanently skipped. */
+    fun markWorkoutProcessed(id: String) {
+        secrets.markProcessed(id)
+    }
+
+    /** Bulk version — used by the action after a scan surfaces already-enriched ids. */
+    fun markWorkoutsProcessed(ids: Collection<String>) {
+        secrets.markProcessedBulk(ids)
+    }
+
+    /** Snapshot of the processed set — exposed for scan logic. */
+    fun processedWorkoutIds(): Set<String> = secrets.processedWorkoutIds
 
     // -------- V2 workout surface --------
 

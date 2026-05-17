@@ -152,31 +152,50 @@ class TaleExecutor @Inject constructor(
      * the GetHealthDataForWorkout reaction (which reads `start_date` /
      * `elapsed_time`) doesn't need to know the source.
      */
+    /**
+     * Backfill-aware: walks Hevy history newest-to-oldest, skipping IDs in the
+     * persistent processed-set, and returns the first workout WITHOUT biometrics
+     * as the candidate. Workouts the scan finds already enriched are recorded
+     * to the processed set so subsequent runs don't re-V2-fetch them.
+     *
+     * One candidate per run is the contract — the SyncBiometricsToHevy reaction
+     * either enriches or marks-as-skipped, and the next tale firing picks the
+     * next one. This lets a daily-cadence Tale slowly backfill the user's
+     * entire history without ever processing more than one workout per tick.
+     */
     private suspend fun executeHevyLastWorkout(): ActionResult {
         if (!hevyHelper.isAuthorized()) {
             return ActionResult.Simple("Error: Hevy not authorized")
         }
         return try {
-            val list = hevyHelper.listLatestWorkoutsV1(pageSize = 1)
-            val workouts = list.optJSONArray("workouts")
-            if (workouts == null || workouts.length() == 0) {
-                return ActionResult.Simple("No Hevy workouts found")
-            }
-            val v1 = workouts.getJSONObject(0)
-            val workoutId = v1.optString("id")
-                .takeIf { it.isNotBlank() }
-                ?: return ActionResult.Simple("Hevy workout missing id")
-            val v2 = hevyHelper.getWorkoutV2(workoutId)
+            val candidate = hevyHelper.findNextWorkoutNeedingEnrichment(
+                skipIds = hevyHelper.processedWorkoutIds()
+            )
 
-            val title = v1.optString("title", v2.optString("name", "(unnamed)"))
-            val activityShim = buildActivityShim(v1)
+            // Whether or not we found a candidate, persist any workouts the
+            // scan surfaced as already-enriched so we save the V2 fetch next
+            // time. Doing this before returning makes the persistence durable
+            // even if the chain crashes later.
+            if (candidate != null && candidate.newlyDiscoveredEnriched.isNotEmpty()) {
+                hevyHelper.markWorkoutsProcessed(candidate.newlyDiscoveredEnriched)
+            }
+
+            if (candidate == null) {
+                return ActionResult.Simple(
+                    "Hevy: nothing to backfill in scan window (all examined workouts already enriched or marked processed)"
+                )
+            }
+
+            val title = candidate.v1.optString("title")
+                .ifBlank { candidate.v2.optString("name", "(unnamed)") }
+            val activityShim = buildActivityShim(candidate.v1)
 
             ActionResult.Hevy(
-                summary = "Got Hevy workout: $title",
-                workoutId = workoutId,
+                summary = "Picked Hevy workout to enrich: $title",
+                workoutId = candidate.workoutId,
                 activityShim = activityShim,
-                workoutV1Json = v1,
-                workoutV2Json = v2
+                workoutV1Json = candidate.v1,
+                workoutV2Json = candidate.v2
             )
         } catch (e: Exception) {
             Log.e(TAG, "Hevy action failed", e)
