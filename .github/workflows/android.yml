@@ -36,8 +36,10 @@ jobs:
 
       # The screenshots are how the design gets looked at on every change: every screen at phone size, with
       # real-looking data (app/src/test/.../ScreenshotTest.kt). They are uploaded as an artifact.
+      # assembleRelease here is unsigned (no secrets on pull requests): it proves the release build and its lint pass
+      # before main tries to sign one.
       - name: Build the APK and photograph every screen
-        run: ./gradlew :app:assembleDebug :app:recordRoborazziDebug --no-daemon --stacktrace
+        run: ./gradlew :app:assembleDebug :app:recordRoborazziDebug :app:assembleRelease --no-daemon --stacktrace
 
       - uses: actions/upload-artifact@v4
         if: always()
