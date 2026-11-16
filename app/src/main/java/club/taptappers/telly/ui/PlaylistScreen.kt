@@ -279,7 +279,7 @@ private fun TrackRow(t: Track, accent: Color, fresh: Boolean, onClick: () -> Uni
 
 /** Three bars rising and falling while the song sounds; at rest when it's paused (and with reduced motion). */
 @Composable
-private fun Bars(moving: Boolean) {
+fun Bars(moving: Boolean) {
     if (!moving || reducedMotion()) {
         Row(horizontalArrangement = Arrangement.spacedBy(3.dp), verticalAlignment = Alignment.Bottom) {
             listOf(0.55f, 0.9f, 0.4f).forEach { h -> Box(Modifier.width(3.dp).height(16.dp * h).clip(RoundedCornerShape(1.5.dp)).background(Color.White)) }

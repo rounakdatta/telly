@@ -58,9 +58,8 @@ class Api(private val prefs: Prefs) {
         call { url -> Request.Builder().url(url("/api/session/$id")).delete().build() }
     }
 
-    /** What the phone is playing -> that song and its lyrics. */
-    suspend fun now(state: PlayerState): LyricsResult =
-        post("/api/now", json.encodeToJsonElement(PlayerState.serializer(), state) as JsonObject, LyricsResult.serializer())
+    /** What the phone plays, as LeZeppLean's helper reports it; with `since`, waits (up to `wait` s) for a change. */
+    suspend fun now(since: Int, wait: Int): PhoneView = get("/api/now?since=$since&wait=$wait", PhoneView.serializer())
 
     /** A song's lyrics again; with `known`, the lines are left out when they haven't changed. */
     suspend fun lyrics(songId: String, known: String?): LyricsResult =
@@ -138,10 +137,6 @@ class Prefs(context: Context) {
 
     val configured: Boolean get() = token.isNotBlank()
 
-    /** The invitation to show lyrics for what's playing was turned down: it isn't offered again (Settings has it). */
-    var lyricsDeclined: Boolean
-        get() = p.getBoolean("lyrics_declined", false)
-        set(v) = p.edit().putBoolean("lyrics_declined", v).apply()
 
     /** The last day seen, so opening the app shows it at once, and still shows it offline. Read and written off the
      *  main thread. */

@@ -38,22 +38,10 @@ data class LyricsResult(
     val trivia: Trivia? = null,
     /** The lines are the ones already on the phone (asked with ?known=): keep those. */
     val unchanged: Boolean = false,
+    /** The song's cover (Apple's, 600 px), when it was found. */
+    val art: String? = null,
 ) {
-    /** Worth asking again: the song or its lyrics are still being found, its words timed, or its notes read. */
+    /** Worth asking again: its lyrics are still being found, its words timed, or its notes read. */
     val settling: Boolean
-        get() = song?.id == null || kind == "pending" || (kind == "synced" && words.status == "pending") || trivia?.status == "pending"
+        get() = kind == "pending" || (kind == "synced" && words.status == "pending") || trivia?.status == "pending"
 }
-
-/** What the phone's player is doing, as /api/now takes it. */
-@Serializable
-data class PlayerState(
-    val app: String,
-    val title: String,
-    val artist: String,
-    val album: String? = null,
-    val durationMs: Long? = null,
-    val state: String,
-    val positionMs: Long,
-    val speed: Float,
-    val sentAt: Long,
-)

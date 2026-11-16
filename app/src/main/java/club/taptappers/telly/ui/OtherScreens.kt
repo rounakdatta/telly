@@ -122,8 +122,6 @@ fun SettingsScreen(
     error: String?,
     onConnect: (String, String) -> Unit,
     onBack: (() -> Unit)?,
-    canSeePlayer: Boolean = true,
-    onAllowPlayer: () -> Unit = {},
 ) {
     var srv by rememberSaveable { mutableStateOf(server) }
     var tok by rememberSaveable { mutableStateOf(token) }
@@ -152,7 +150,7 @@ fun SettingsScreen(
                 PrimaryPill(if (firstRun) "Connect" else "Save and check", null, onClick = { onConnect(srv, tok) }, busy = loading,
                     enabled = tok.isNotBlank(), modifier = Modifier.fillMaxWidth())
                 error?.let { Text(it, style = T.caption, color = C.problem, modifier = Modifier.padding(top = 12.dp)) }
-                status?.let { StatusCard(it, canSeePlayer, onAllowPlayer) }
+                status?.let { StatusCard(it) }
             }
         }
     }
@@ -179,18 +177,15 @@ private fun Field(label: String, value: String, onValue: (String) -> Unit, type:
 }
 
 @Composable
-private fun StatusCard(s: Status, canSeePlayer: Boolean, onAllowPlayer: () -> Unit) {
+private fun StatusCard(s: Status) {
     val n = NumberFormat.getIntegerInstance(Locale.getDefault())
     Column(Modifier.padding(top = 28.dp)) {
         Text("Connected", style = T.small, color = C.text3)
         StatusRow("YouTube Music", s.ytm.account?.let { "Signed in as $it" } ?: (s.ytm.error ?: "Not connected"), s.ytm.ok)
         StatusRow("Spotify", s.spotify.account?.let { "Signed in as $it" } ?: "Not connected yet", s.spotify.ok)
         StatusRow("Stories", if (s.llm) "Written by your Claude" else "Off: no language model configured", s.llm)
-        when {
-            !s.lyrics -> StatusRow("Words", "Off: the server has no lyrics service", false)
-            canSeePlayer -> StatusRow("Words", "Shown for what's playing, timed to every word", true)
-            else -> StatusRow("Words", "Off: telly can't see the music player yet", false, action = "Allow" to onAllowPlayer)
-        }
+        StatusRow("Words", if (s.lyrics) "For what's playing, timed to every word (the LeZeppLean helper says what plays)"
+            else "Off: the server has no lyrics service", s.lyrics)
         s.catalog?.let { c ->
             val built = SimpleDateFormat("d MMM", Locale.getDefault()).format(Date(c.builtAt * 1000))
             StatusRow("Your music", "${n.format(c.songs)} songs you know, ${n.format(c.new)} new ones lined up (from $built)", true)

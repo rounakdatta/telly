@@ -8,7 +8,6 @@ import club.taptappers.telly.data.Api
 import club.taptappers.telly.data.Day
 import club.taptappers.telly.data.LibraryDay
 import club.taptappers.telly.data.LyricsResult
-import club.taptappers.telly.data.NowPlaying
 import club.taptappers.telly.data.Playing
 import club.taptappers.telly.data.Prefs
 import club.taptappers.telly.data.Session
@@ -78,12 +77,6 @@ data class UiState(
     val lyrics: LyricsResult? = null,
     /** Why there are no lyrics, when it isn't simply that they're on their way. */
     val lyricsError: String? = null,
-    /** telly may see the music player (Android calls it notification access). */
-    val canSeePlayer: Boolean = false,
-    /** Invite him to let it: it can't yet, and he hasn't said no. */
-    val offerLyrics: Boolean = false,
-    /** He went to allow it and came back without: Android may be calling it a restricted setting. */
-    val lyricsStuck: Boolean = false,
 ) {
     val top: Screen get() = stack.last()
     val sending: Boolean get() = exchange?.phase == Phase.WORKING
@@ -96,9 +89,9 @@ class TellyModel(app: Application) : AndroidViewModel(app) {
     val state: StateFlow<UiState> = _state
     private var poller: Job? = null
     private var foreground = true
-    private val now = NowPlaying(app)
+    private var watcher: Job? = null
     private var follower: Job? = null
-    private var askedForAccess = false
+    private var followingSong: String? = null
 
     val server: String get() = prefs.server
     val token: String get() = prefs.token
@@ -108,7 +101,6 @@ class TellyModel(app: Application) : AndroidViewModel(app) {
             prefs.loadDay()?.let { d -> _state.update { if (it.day == null) it.copy(day = d) else it } }
             if (prefs.configured) refreshDay()
         }
-        viewModelScope.launch { now.playing.collect { onPlaying(it) } }
     }
 
     // -- navigation ---------------------------------------------------------------------------------------------------
@@ -131,14 +123,8 @@ class TellyModel(app: Application) : AndroidViewModel(app) {
 
     fun setForeground(on: Boolean) {
         foreground = on
-        // The player is followed only while telly is on screen: nothing runs in the background.
-        if (on) now.start() else now.stop()
-        if (on) {
-            val access = now.hasAccess()
-            _state.update {
-                it.copy(canSeePlayer = access, offerLyrics = !access && !prefs.lyricsDeclined, lyricsStuck = !access && askedForAccess)
-            }
-        }
+        // What's playing is followed only while telly is on screen: nothing runs in the background.
+        if (on && prefs.configured) watch() else { watcher?.cancel(); watcher = null }
         if (on && prefs.configured) {
             when (val top = _state.value.top) {
                 is Screen.Playlist -> refreshSession(top.id)
@@ -388,35 +374,63 @@ class TellyModel(app: Application) : AndroidViewModel(app) {
     }
 
     // -- what's playing ------------------------------------------------------------------------------------------------
+    /**
+     * What the phone plays, as LeZeppLean's helper reports it: asked in a long poll, so a new song, a pause or a seek
+     * arrives the moment the helper tells of it, and nothing is asked between changes but the poll itself.
+     */
+    private fun watch() {
+        if (watcher?.isActive == true) return
+        watcher = viewModelScope.launch {
+            var version = -1
+            var errors = 0
+            while (true) {
+                try {
+                    val v = api.now(version, if (version < 0) 0 else 8)
+                    version = v.version
+                    errors = 0
+                    onPlaying(Playing.of(v))
+                } catch (e: TellyError) {
+                    if (e.code == 503) return@launch // the server has no lyrics service: nothing to follow
+                    delay(minOf(30_000L, 2_000L shl minOf(errors++, 4)))
+                }
+            }
+        }
+    }
+
     private fun onPlaying(p: Playing?) {
         val was = _state.value.playing
         _state.update { it.copy(playing = p) }
-        if (p?.key == was?.key) return
-        follower?.cancel()
-        _state.update { it.copy(lyrics = null, lyricsError = null) }
-        if (p != null && prefs.configured) follower = viewModelScope.launch { follow(p) }
+        if (p?.key != was?.key) {
+            follower?.cancel()
+            followingSong = null
+            _state.update { it.copy(lyrics = null, lyricsError = null) }
+        }
+        // LeZeppLean names the song a moment after it starts: its lyrics are asked for once it has.
+        val id = p?.songId ?: return
+        if (id != followingSong) {
+            follower?.cancel()
+            followingSong = id
+            follower = viewModelScope.launch { follow(p, id) }
+        }
     }
 
     /**
      * The song's lyrics, then again every few seconds while its words are being timed to the recording and its notes
-     * read: the lines appear first, then sweep word by word as the timings land. A song skipped past within a moment
-     * is never asked about.
+     * read: the lines appear first, then sweep word by word as the timings land.
      */
-    private suspend fun follow(p: Playing) {
-        delay(700)
+    private suspend fun follow(p: Playing, id: String) {
         var got: LyricsResult? = null
         var errors = 0 // in a row: one success forgives the rest
-        var unnamed = 0 // answers that couldn't yet say which song this is
         var polls = 0
-        val giveUp = { why: String? -> _state.update { if (it.playing?.key == p.key) it.copy(lyricsError = why) else it } }
         while (true) {
             while (!foreground) delay(1000)
-            val id = got?.song?.id
             val r = try {
-                if (id == null) api.now((_state.value.playing?.takeIf { it.key == p.key } ?: p).report())
-                else api.lyrics(id, got?.version).let { n -> if (n.unchanged) n.copy(lines = got?.lines.orEmpty(), unchanged = false) else n }
+                api.lyrics(id, got?.version).let { n -> if (n.unchanged) n.copy(lines = got?.lines.orEmpty(), unchanged = false) else n }
             } catch (e: TellyError) {
-                if (e.code == 503 || ++errors >= 4) return giveUp(e.message)
+                if (e.code == 503 || ++errors >= 4) {
+                    _state.update { if (it.playing?.key == p.key) it.copy(lyricsError = e.message) else it }
+                    return
+                }
                 delay(3000L * errors)
                 continue
             }
@@ -424,33 +438,19 @@ class TellyModel(app: Application) : AndroidViewModel(app) {
             got = r
             _state.update { if (it.playing?.key == p.key) it.copy(lyrics = r, lyricsError = null) else it }
             if (!r.settling) return
-            if (r.song?.id == null && ++unnamed > 8) return giveUp("Couldn't work out which song this is.")
             // Timing a song's words takes a minute or two; past that, something is stuck, so ask less often.
-            delay(if (r.song?.id == null) 1500 else if (++polls > 35) 10_000 else 3500)
+            delay(if (++polls > 35) 10_000 else 3500)
         }
     }
 
     /** Ask for the lyrics again (after they couldn't be fetched). */
     fun retryLyrics() {
         val p = _state.value.playing ?: return
+        val id = p.songId ?: return
         follower?.cancel()
+        followingSong = id
         _state.update { it.copy(lyrics = null, lyricsError = null) }
-        follower = viewModelScope.launch { follow(p) }
-    }
-
-    fun playPause() = now.playPause()
-    fun next() { now.next() }
-    fun previous() { now.previous() }
-    fun seekTo(ms: Long) { now.seekTo(ms) }
-
-    /** He's on his way to Android's settings to let telly see the player. */
-    fun askingForAccess() {
-        askedForAccess = true
-    }
-
-    fun declineLyrics() {
-        prefs.lyricsDeclined = true
-        _state.update { it.copy(offerLyrics = false) }
+        follower = viewModelScope.launch { follow(p, id) }
     }
 
     // -- settings -----------------------------------------------------------------------------------------------------
@@ -463,6 +463,7 @@ class TellyModel(app: Application) : AndroidViewModel(app) {
                 val s = api.status()
                 _state.update { it.copy(configured = true, status = s, statusLoading = false) }
                 refreshDay()
+                if (foreground) watch()
             } catch (e: TellyError) {
                 _state.update { it.copy(statusLoading = false, statusError = e.message) }
             }

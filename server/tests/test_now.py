@@ -15,15 +15,16 @@ from telly.canvas import Canvas
 from telly.context import Place
 from telly.genius import Genius, clean, pick, place
 from telly.llm import LLM
-from telly.lyrics import Lyrics, player_state
+import telly.art
+from telly.lyrics import Lyrics
 from telly.store import Store
 
 LEZ_TOKEN = 'lez-token'
 
 
 class FakeLeZeppLean(BaseHTTPRequestHandler):
-    """POST /phone names the song a moment later (as the real one does), POST /lyrics answers for it."""
-    version, song_id, title = 0, None, None
+    """The phone, as LeZeppLean's helper reports it (GET /phone/next waits for a change), and POST /lyrics."""
+    version, song_id, title = 7, 'p0123456789ab', 'Bohemian Rhapsody'
     changed = threading.Event()
     lines = [[1200, 'Is this the real life?', [1200, 1500, 1800, 2300, 2600], 4000], [5000, 'Is this just fantasy?', None, None]]
 
@@ -50,15 +51,7 @@ class FakeLeZeppLean(BaseHTTPRequestHandler):
         body = json.loads(self.rfile.read(int(self.headers.get('Content-Length') or 0)) or b'{}')
         cls = type(self)
         if self.path == '/phone':
-            if body.get('title') != cls.title:
-                cls.title, cls.song_id, cls.version = body['title'], None, cls.version + 1
-
-                def resolve():
-                    time.sleep(0.2)
-                    cls.song_id, cls.version = 'p0123456789ab', cls.version + 1
-                    cls.changed.set()
-                threading.Thread(target=resolve, daemon=True).start()
-            self._send(200, {'ok': True, 'version': cls.version, 'songId': cls.song_id})
+            self._send(410, {'detail': 'telly must never report for the phone'})
         elif self.path == '/lyrics':
             if body.get('song') != 'p0123456789ab':
                 return self._send(200, {'ok': False, 'reason': 'unknown_song'})
@@ -72,9 +65,13 @@ class FakeLeZeppLean(BaseHTTPRequestHandler):
             return
         cls = type(self)
         if self.path.startswith('/phone/next'):
-            cls.changed.wait(4)
-            cls.changed.clear()
-            self._send(200, {'version': cls.version, 'title': cls.title, 'songId': cls.song_id})
+            q = dict(x.split('=') for x in self.path.split('?', 1)[1].split('&'))
+            if int(q['since']) == cls.version:
+                cls.changed.wait(float(q['wait']))  # nothing new: wait for the helper's next report
+                cls.changed.clear()
+            self._send(200, {'version': cls.version, 'app': 'com.google.android.apps.youtube.music', 'title': cls.title, 'artist': 'Queen',
+                             'durationMs': 354000, 'playing': True, 'active': True, 'stale': False, 'positionMs': 61250,
+                             'speed': 1.0, 'songId': cls.song_id, 'ageMs': 900, 'heard': None})
         else:
             self._send(404, {})
 
@@ -155,15 +152,6 @@ class GeniusTest(unittest.TestCase):
         self.assertEqual(1, FakeGenius.looks)
 
 
-class PlayerStateTest(unittest.TestCase):
-    def test_reports_are_checked_and_trimmed(self):
-        self.assertIsNone(player_state({'artist': 'Queen'}), 'a report must name a song')
-        s = player_state({'title': '  Bohemian   Rhapsody ', 'artist': 'Queen', 'durationMs': True, 'positionMs': -5, 'state': 'exploded',
-                          'speed': 99, 'app': 'x' * 500})
-        self.assertEqual('Bohemian Rhapsody', s['title'])
-        self.assertEqual((None, 0.0, 'playing', 1.0, 100), (s['durationMs'], s['positionMs'], s['state'], s['speed'], len(s['app'])))
-
-
 class NowApiTest(Base):
     @classmethod
     def setUpClass(cls):
@@ -177,8 +165,14 @@ class NowApiTest(Base):
         cls.token = 'x' * 40
         lyrics = Lyrics(f'http://127.0.0.1:{lez.server_address[1]}', LEZ_TOKEN)
         cls.genius = FakeGenius(store, None)
-        cls.PORT = start(PublicApp(cls.token, canvas, store, cats, limits=Limits(budgets={'now': 3, 'lyrics': 100}), lyrics=lyrics, genius=cls.genius))
+        cls.PORT = start(PublicApp(cls.token, canvas, store, cats, limits=Limits(budgets={'now': 4, 'lyrics': 100}), lyrics=lyrics, genius=cls.genius))
         cls.BARE = start(PublicApp(cls.token, canvas, store, cats))
+        cls.real_cover, telly.art.cover = telly.art.cover, lambda store, title, artist: 'https://covers.example/rhapsody.jpg'
+
+    @classmethod
+    def tearDownClass(cls):
+        telly.art.cover = cls.real_cover
+        super().tearDownClass()
 
     def req(self, method, path, body=None, port=None):
         r = urllib.request.Request(f'http://127.0.0.1:{port or self.PORT}{path}', method=method,
@@ -190,9 +184,16 @@ class NowApiTest(Base):
             return e.code, json.loads(e.read() or b'{}')
 
     def test_now_playing_to_word_timed_lyrics_and_notes(self):
-        code, got = self.req('POST', '/api/now', {'title': 'Bohemian Rhapsody', 'artist': 'Queen', 'durationMs': 354000, 'state': 'playing', 'positionMs': 0})
+        code, now = self.req('GET', '/api/now?since=-1&wait=0')
         self.assertEqual(200, code)
-        self.assertEqual('p0123456789ab', got['song']['id'], 'the song LeZeppLean worked out a moment after the report')
+        self.assertEqual(('Bohemian Rhapsody', 'p0123456789ab', True, 61250), (now['title'], now['songId'], now['playing'], now['positionMs']))
+        started = time.time()
+        threading.Timer(0.3, FakeLeZeppLean.changed.set).start()  # the helper says something
+        self.assertEqual(200, self.req('GET', f"/api/now?since={now['version']}&wait=5")[0])
+        self.assertLess(time.time() - started, 3, 'a long poll answers when the phone changes, not when it times out')
+        code, got = self.req('GET', f"/api/lyrics/{now['songId']}")
+        self.assertEqual(200, code)
+        self.assertEqual('https://covers.example/rhapsody.jpg', got['art'])
         self.assertEqual({'start': 1200, 'text': 'Is this the real life?', 'words': [1200, 1500, 1800, 2300, 2600], 'end': 4000}, got['lines'][0])
         self.assertIsNone(got['lines'][1]['words'], 'a line the aligner is unsure of is timed by the line')
         self.assertEqual('pending', got['trivia']['status'])
@@ -200,12 +201,12 @@ class NowApiTest(Base):
         code, again = self.req('GET', '/api/lyrics/p0123456789ab?known=v1')
         self.assertEqual((200, [], True), (code, again['lines'], again['unchanged']), 'lines the phone has are not sent again')
         self.assertEqual([{'line': 1, 'text': 'The ballad section begins with this question.'}], again['trivia']['lines'])
-        self.assertEqual(400, self.req('POST', '/api/now', {'artist': 'Queen'})[0])
-        codes = [self.req('POST', '/api/now', {'title': 'Bohemian Rhapsody'})[0] for _ in range(2)]
-        self.assertEqual([200, 429], codes, 'naming songs has an hourly budget (3 here)')
+        self.assertEqual(400, self.req('GET', '/api/now?since=x')[0])
+        self.assertEqual(400, self.req('GET', '/api/now?wait=nan')[0])
+        self.assertEqual(429, self.req('GET', '/api/now?since=-1&wait=0')[0], 'asking what plays has an hourly budget (4 here)')
 
     def test_without_lyrics_configured_it_says_so(self):
-        self.assertEqual(503, self.req('POST', '/api/now', {'title': 'Bohemian Rhapsody'}, port=self.BARE)[0])
+        self.assertEqual(503, self.req('GET', '/api/now', port=self.BARE)[0])
         self.assertFalse(self.req('GET', '/api/status', port=self.BARE)[1]['lyrics'])
 
 

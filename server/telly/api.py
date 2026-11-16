@@ -25,7 +25,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from .canvas import NoCatalog
 from .catalog import Catalog
 from .engine import TWEAKS
-from .lyrics import LyricsError, player_state
+from . import art
+from .lyrics import LyricsError
 from . import ytm as ytm_mod
 
 log = logging.getLogger('telly')
@@ -159,8 +160,9 @@ class PublicApp(Base):
     def __init__(self, token, canvas, store, catalogs, limits=None, lyrics=None, genius=None):
         super().__init__(token, 'TELLY_TOKEN')
         self.canvas, self.store, self.catalogs, self.lyrics, self.genius = canvas, store, catalogs, lyrics, genius
-        # `now` names a song to LeZeppLean, which fetches and times it (minutes of CPU): a leaked token mustn't spin that.
-        self.limits = limits or Limits(budgets={'prompt': 60, 'change': 600, 'now': 300, 'lyrics': 2400})
+        # The phone asks what's playing in a long poll (one at a time, each waiting up to 8 s), and a song's lyrics every
+        # few seconds while its words are timed.
+        self.limits = limits or Limits(budgets={'prompt': 60, 'change': 600, 'now': 1500, 'lyrics': 2400})
 
     def routes(self):
         return [
@@ -176,7 +178,7 @@ class PublicApp(Base):
             ('POST', r'/api/session/([0-9a-f]{10})/sync', self.resync, True, 'change'),
             ('DELETE', r'/api/session/([0-9a-f]{10})', self.delete, True, 'change'),
             ('GET', r'/api/library', self.library, True, None),
-            ('POST', r'/api/now', self.now, True, 'now'),
+            ('GET', r'/api/now', self.now, True, 'now'),
             ('GET', r'/api/lyrics/([A-Za-z0-9_-]{1,64})', self.get_lyrics, True, 'lyrics'),
         ]
 
@@ -268,18 +270,22 @@ class PublicApp(Base):
 
     # -- what's playing, and its lyrics ------------------------------------------------------------------------------
     def now(self, m, q, body):
-        """The phone's player (what it plays, where in it) -> that song and its lyrics."""
+        """What the phone plays, as LeZeppLean's helper reports it. With ?since=<version>&wait=<s> the answer waits (up
+        to 8 s) for something to change, so the phone hears of a new song, a pause or a seek at once without polling."""
         if not (self.lyrics and self.lyrics.ready):
             return 503, {'error': 'Lyrics are not set up on this server.'}
-        state = player_state(body)
-        if state is None:
-            return 400, {'error': 'title is required'}
         try:
-            got = self.lyrics.now(state)
+            since = int((q.get('since') or ['-1'])[0])
+            wait = float((q.get('wait') or ['0'])[0])
+        except ValueError:
+            return 400, {'error': 'since and wait must be numbers'}
+        if not (wait == wait and 0 <= wait <= 60):  # NaN, or nonsense
+            return 400, {'error': 'wait must be 0-60'}
+        try:
+            return 200, self.lyrics.phone(since, wait)
         except LyricsError as e:
             log.warning('lyrics: %s', str(e)[:160])
             return 502, {'error': "Couldn't reach the lyrics service."}
-        return 200, self._dress(got, None)
 
     def get_lyrics(self, m, q, body):
         """A song's lyrics again, while its words are being timed. With ?known=<version> the lines are left out when
@@ -295,6 +301,11 @@ class PublicApp(Base):
 
     def _dress(self, got, known):
         song = got.get('song') or {}
+        if song.get('title'):
+            try:
+                got['art'] = art.cover(self.store, song['title'], song.get('artist') or '')
+            except Exception:
+                log.exception('cover for %s', song.get('id'))
         if self.genius and song.get('title'):
             try:
                 got['trivia'] = self.genius.trivia(song['title'], song.get('artist') or '', got['lines'])
