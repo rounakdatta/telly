@@ -105,8 +105,13 @@ For each song, write the one thing you'd say as it starts: a fun fact, a bit of 
 callback to his own history with it. One or two short sentences, at most 26 words.
 
 Rules:
-- Facts only from that song's source or his history. Never invent dates, numbers, chart positions, quotes or stories.
-  When neither has anything worth saying, point to something to listen for in terms that can't be wrong, or leave it empty.
+- A fact must be stated in that song's source in so many words, or in his history. Never combine or infer: "nominated
+  five times between 1977 and 1981" is not "this song nearly won". Never invent dates, numbers, chart positions,
+  quotes or stories.
+- When the source is about the artist or the film rather than the song, say the fact about the artist or the film, not
+  about this song.
+- When neither has anything worth saying, point to something to listen for in terms that can't be wrong, or leave it
+  empty.
 - Talk to him as "you". Warm and a little playful; no hype words; at most one exclamation mark across all the notes.
 - Vary how the notes begin. Not every note is trivia: mix in personal ones ("You've played this 45 times; first in
   March 2023") and things to listen for."""

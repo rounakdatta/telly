@@ -23,7 +23,8 @@ tools/    bake_catalog.py: turns a music-taste workspace into the catalogue the 
 **The server holds three things on its volume (`/data`):**
 
 - `catalog.db`: the songs you know (plays, skips, likes, world, sound), the new songs lined up for you, and how your
-  worlds mix by hour and by activity. It is built offline by `tools/bake_catalog.py` and uploaded with
+  worlds mix by hour and by activity. It is built offline by `tools/bake_catalog.py`, then `tools/enrich_vocals.py`
+  marks which songs are instrumental (from LRCLIB; the audio features can't tell), and it is uploaded with
   `PUT /admin/catalog`.
 - `telly.db`: every day's canvas, each playlist and every version of it, plus the song-match cache.
 - The music-service sign-ins, set through `POST /admin/ytm` (cookies from a signed-in music.youtube.com) and

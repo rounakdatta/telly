@@ -249,7 +249,7 @@ private fun TrackRow(t: Track, accent: Color, fresh: Boolean, onClick: () -> Uni
             Text(t.artist, style = T.caption, color = C.text2, maxLines = 1, overflow = TextOverflow.Ellipsis)
             // The friend leaning over: arrives a little after the playlist, so it fades in rather than pops.
             AnimatedVisibility(visible = t.note != null, enter = fadeIn(tween(500)) + expandVertically(tween(300))) {
-                Text(t.note.orEmpty(), style = T.caption, color = C.text.copy(alpha = 0.72f), maxLines = 3, overflow = TextOverflow.Ellipsis,
+                Text(t.note.orEmpty(), style = T.caption, color = C.text.copy(alpha = 0.6f), maxLines = 3, overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.padding(top = 5.dp))
             }
         }

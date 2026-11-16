@@ -60,7 +60,9 @@ fun ExchangeCard(ex: Exchange, session: Session?, haze: HazeState, onOpen: ((Str
             .animateContentSize()
             .semantics { liveRegion = LiveRegionMode.Polite },
     ) {
-        ex.said?.let { said ->
+        // Your words while telly works on them; once it has answered they live in the conversation thread, and the
+        // card shrinks to the answer (it may stay a while as notes are written, so it should take little room).
+        ex.said?.takeIf { ex.phase == Phase.WORKING }?.let { said ->
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
                 Text(
                     said, style = T.caption, color = C.text, maxLines = 3, overflow = TextOverflow.Ellipsis,
