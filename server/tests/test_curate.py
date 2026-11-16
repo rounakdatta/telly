@@ -101,3 +101,131 @@ class CuratorTest(Base):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class CuratedCanvasTest(Base):
+    """The curator inside the canvas: never holding everyone up, obeying the playlist's rules, keeping its notes."""
+
+    def setUp(self):
+        import tempfile
+        import threading
+        import time as _t
+        from telly.canvas import Canvas
+        from telly.context import Place
+        from telly.llm import LLM
+        from telly.store import Store
+        self.tmpd = tempfile.TemporaryDirectory()
+        self.store = Store(os.path.join(self.tmpd.name, 'telly.db'))
+        self.canvas = Canvas(self.store, Catalogs(self.path), Place(), LLM('http://127.0.0.1:9', 'k', 'm'))
+        self.canvas.place.forecast = lambda: None
+        self.threading, self.time = threading, _t
+
+    def curate_with(self, llm):
+        self.canvas.curator_llm = llm
+
+    def mix_llm(self, delay=0.0, pick=lambda pool: [1, 2, 3, 4], by_name=()):
+        test = self
+
+        class Mixer(FakeLLM):
+            ready = True
+
+            def tool(self, system, user, tool, **kw):
+                if tool['name'] == 'mixtape':
+                    test.time.sleep(delay)
+                    n = user.count('\n[')  # songs listed
+                    songs = [{'title': t['title'], 'artist': t['artist'], 'part': 'p', 'link': 'l'} for t in by_name]
+                    return {'title': 'A Test Mix', 'thread': 't', 'songs': songs + [{'n': i, 'part': 'p', 'link': 'l'} for i in pick(n) if i <= n]}
+                return super().tool(system, user, tool, **kw)
+        return Mixer()
+
+    def test_a_slow_curator_holds_nobody_up(self):
+        from telly import engine as E
+        day = self.canvas.place.today()
+        sid = self.store.new_session(day, 'walk')
+        brief = E.normalize({'activity': 'walk', 'minutes': 20})
+        tracks, _ = E.rebuild(self.canvas.cat, brief, 18, [], {})
+        self.canvas._save(sid, 'prompt', 'a walk', 'ok', brief, tracks)
+        self.curate_with(self.mix_llm(delay=1.5))
+        action = {'target': 'new', 'activity': 'sleep', 'minutes': 15, 'title': 'sleep', 'reply': 'ok'}
+        import telly.interpret as I
+        real = I.plan
+        I.plan = lambda *a, **k: ([action], None, None)
+        try:
+            t = self.threading.Thread(target=self.canvas.prompt, args=(day, 'night music'))
+            t.start()
+            self.time.sleep(0.3)
+            started = self.time.time()
+            self.canvas.edit(sid, 'pin', 0)  # another playlist, while the curator thinks
+            waited = self.time.time() - started
+            t.join()
+        finally:
+            I.plan = real
+        self.assertLess(waited, 1.0, 'an edit elsewhere never waits on the curator')
+
+    def test_a_curated_change_keeps_pins_and_removals(self):
+        from telly import engine as E
+        day = self.canvas.place.today()
+        self.curate_with(self.mix_llm())
+        brief = E.normalize({'activity': 'walk', 'minutes': 20, 'title': 'walk'})
+        got = self.canvas._curate(None, day, brief, 'a walk')
+        self.assertIsNotNone(got)
+        tracks, brief = got
+        sid = self.store.new_session(day, 'walk')
+        self.canvas._save(sid, 'prompt', 'a walk', 'ok', brief, tracks)
+        self.canvas.edit(sid, 'pin', 2)
+        pinned = self.store.version(sid)['tracks'][2]['id']
+        self.canvas.edit(sid, 'remove', 0)
+        removed = tracks[0]['id']
+        # the curator now asks for the removed song again, by name, and leaves the pinned one out
+        self.curate_with(self.mix_llm(pick=lambda n: [1, 2, 3, 4, 5, 6], by_name=[tracks[0]]))
+        self.canvas.tweak(sid, 'calmer')
+        after = [t['id'] for t in self.store.version(sid)['tracks']]
+        self.assertNotIn(removed, after, 'a song he removed stays removed')
+        self.assertIn(pinned, after, 'a song he pinned stays')
+        self.assertEqual('A Test Mix', self.store.version(sid)['brief']['mix']['title'], 'a tweak keeps the mix its name')
+        self.assertEqual('a walk', self.store.version(sid)['brief']['mix']['said'], 'and remembers what he first asked')
+
+    def test_a_song_by_another_artist_is_not_taken_from_his_library(self):
+        cur = C.Curator(FakeLLM(), Catalogs(self.path).get(), 'a listener')
+        pool, builder = cur.pool(E_brief(), 0, {})
+        self.assertIsNone(cur.in_library('Song 5', 'Somebody Else', builder))
+
+    def test_notes_never_stay_writing_and_survive_a_move(self):
+        from telly import engine as E
+        from telly.sync import Worker
+        day = self.canvas.place.today()
+        self.curate_with(self.mix_llm())
+        tracks, brief = self.canvas._curate(None, day, E.normalize({'activity': 'walk', 'minutes': 20, 'title': 'walk'}), 'a walk')
+        sid = self.store.new_session(day, 'walk')
+        self.canvas._save(sid, 'prompt', 'a walk', 'ok', brief, tracks)
+
+        class NoServices:
+            def ytm(self): return None
+            def spotify(self): return None
+        w = Worker(self.store, NoServices(), self.canvas)
+        import telly.curate as mod
+        real = mod.liner_notes
+        mod.liner_notes = lambda *a, **k: (_ for _ in ()).throw(ConnectionResetError('reset'))
+        try:
+            w._mix_notes(sid, self.store.session(sid), self.store.version(sid))
+        finally:
+            mod.liner_notes = real
+        self.assertEqual('none', self.store.session(sid)['notes_state'], 'a failure never leaves it "writing"')
+        mod.liner_notes = lambda *a, **k: {'thread': 'th', 'intro': 'in', 'outro': 'out', 'notes': {t['id']: 'n' for t in a[6]}}
+        try:
+            w._mix_notes(sid, self.store.session(sid), self.store.version(sid))
+            self.canvas.edit(sid, 'move', 0, to=2)
+            asked = []
+            mod.liner_notes = lambda *a, **k: asked.append(1) or {}
+            w._mix_notes(sid, self.store.session(sid), self.store.version(sid))
+        finally:
+            mod.liner_notes = real
+        self.assertEqual([], asked, 'a move keeps the story it has')
+        shown = self.canvas.session(sid)
+        self.assertEqual('th', shown['summary'])
+        self.assertTrue(all(t['note'] == 'n' for t in shown['tracks']))
+
+
+def E_brief():
+    from telly import engine as E
+    return E.normalize({'activity': 'walk', 'minutes': 20})

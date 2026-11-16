@@ -15,8 +15,8 @@ The story along the songs is written afterwards (story.py, in the background), f
 """
 import json
 import logging
-import math
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -91,9 +91,13 @@ def _known(t, now):
     return 'new to him'
 
 
+APPLE_KEEP = 30 * 86400  # what Apple's catalogue said about a song (found or not), kept this long
+APPLE_REST = [0.0]       # Apple refused us (403/429): no lookups until then, and nothing from it is taken as "doesn't exist"
+
+
 class Curator:
-    def __init__(self, llm, cat, about):
-        self.llm, self.cat, self.about = llm, cat, about
+    def __init__(self, llm, cat, about, store=None):
+        self.llm, self.cat, self.about, self.store = llm, cat, about, store
 
     # -- what the curator chooses from -------------------------------------------------------------------------------
     def pool(self, brief, hour, served, size=110):
@@ -118,15 +122,16 @@ class Curator:
         return [self.cat.artist_name.get(k, k) for k, _ in top]
 
     # -- choosing ----------------------------------------------------------------------------------------------------
-    def choose(self, brief, moment, said, lens, hour, served, keep=None, instruction=None):
+    def choose(self, brief, moment, said, lens, hour, served, keep=None, instruction=None, deadline=None):
         """-> (title, thread, [(track, part, link)]) or None. `keep`: the songs a mix has now (when changing one), and
-        `instruction` what he asked of it."""
+        `instruction` what he asked of it. Everything is done by `deadline` (epoch s), or the engine takes over."""
+        deadline = deadline or time.time() + 90
         pool, builder = self.pool(brief, hour, served)
         now = time.time()
         listing = '\n'.join(f"[{i}] {t['title']} — {t['artist']} · {WORLD_WORDS.get(t.get('world'), t.get('world') or '')}"
                             f" · {_known(t, now)}{', ' + str(t.get('plays')) + ' plays' if t.get('plays') else ''}"
                             f"{' · ' + _words(t) if _words(t) else ''}" for i, t in enumerate(pool, 1))
-        n_songs = max(3, round(brief['minutes'] * 60_000 / E.AVG_MS))
+        n_songs = min(45, max(3, round(brief['minutes'] * 60_000 / E.AVG_MS)))
         known_n = round(n_songs * brief['familiar'])
         cfg = E.config(brief)
         e0, e1 = cfg['energy']
@@ -155,8 +160,8 @@ cultures and decades. When it isn't about music, connect only the songs that tru
 never forced; the moment still comes first."""
         current = ''
         if keep:
-            current = '\nThe mix as it is now (keep what still serves the thread):\n' + '\n'.join(
-                f"- {t['title']} — {t['artist']}" for t in keep)
+            current = '\nThe mix as it is now (keep what still serves the thread; songs marked kept stay, in place):\n' + '\n'.join(
+                f"- {t['title']} — {t['artist']}{' (kept)' if t.get('pinned') else ''}" for t in keep)
         user = f"""For: {moment}
 His words: "{said}"{f'''
 He now asks: "{instruction}"''' if instruction else ''}
@@ -180,19 +185,28 @@ Songs that fit this moment, from his library and the new ones lined up for him:
 {listing}
 
 Make the mix: its title, its thread, and its songs in order, each with its part and why it follows the last."""
-        out = self.llm.tool(SYSTEM, user, TOOL, max_tokens=2600, timeout=150, retries=1, wait=10)
-        picks = self.resolve(out.get('songs') or [], pool, builder)
+        budget = deadline - time.time() - 12  # leave time to find the songs from anywhere
+        if budget < 15:
+            return None
+        out = self.llm.tool(SYSTEM, user, TOOL, max_tokens=4000, timeout=min(75, budget), retries=0, wait=0)
+        picks = self.resolve(out.get('songs') or [], pool, builder, keep, deadline)
         if len(picks) < max(3, n_songs // 2):
             log.warning('curator: only %d of the songs resolved', len(picks))
             return None
         return (str(out.get('title') or brief['title']).strip()[:60], str(out.get('thread') or '').strip()[:300], picks)
 
     # -- making the choice real ----------------------------------------------------------------------------------------
-    def resolve(self, songs, pool, builder):
+    def resolve(self, songs, pool, builder, keep=None, deadline=None):
         """The curator's songs -> [(track, part, link)]: from the list; his best-fitting song by an artist; or a song
-        from anywhere, found in Apple's catalogue (nothing imagined is played). Repeats and excluded artists drop out."""
+        from anywhere, found in Apple's catalogue (nothing imagined is played). Every pick obeys the playlist's rules
+        (removed songs stay removed, excluded artists, origins, instrumental); repeats drop out; songs he pinned keep
+        their places."""
+        deadline = deadline or time.time() + 60
         out, seen, per_artist = [], set(), {}
         excluded = self.cat.artist_keys(builder.b.get('exclude_artists'))
+        included = self.cat.artist_keys(builder.b.get('include_artists'))
+        instrumental = E.is_instrumental(builder.b)
+        kept = {t['id']: t for t in keep or []}
         for s in songs:
             if not isinstance(s, dict):
                 continue
@@ -201,22 +215,42 @@ Make the mix: its title, its thread, and its songs in order, each with its part 
             if isinstance(n, int) and 1 <= n <= len(pool):
                 t = pool[n - 1]
             elif s.get('library_artist'):
-                t = self.library_song(s['library_artist'], builder, seen)
+                t = self.library_song(str(s['library_artist']), builder, seen)
             elif s.get('title') and s.get('artist'):
-                t = self.cat.find(s['title'], s['artist'])
-                if t is not None:
-                    t = dict(t, pool=E.pool_of(t, builder.now) or ('new_known' if t.get('kind') == 'new_known' else t.get('kind') or 'new_frontier'))
-                else:
-                    t = self.anywhere(s['title'], s['artist'])
-            if not t or t['id'] in seen or t.get('artist_key') in excluded:
+                title, artist = str(s['title']), str(s['artist'])
+                ext = E.external(title, artist)['id']
+                t = kept.get(ext) or self.in_library(title, artist, builder)
+                if t is None and time.time() < deadline - 5:
+                    t = self.anywhere(title, artist)
+            if not t or t['id'] in seen:
                 continue
+            if t['id'] in builder.avoid or t.get('artist_key') in excluded:
+                continue  # removed from this playlist before, or an artist he excluded
+            if t.get('kind') != 'curated':  # his library: its world, origin and sound are known
+                if not builder.allowed(t) or (instrumental and not E.instrumental_ok(t)):
+                    continue
             a = t.get('artist_key') or nartist(t.get('artist'))
-            if per_artist.get(a, 0) >= (2 if a in self.cat.artist_keys(builder.b.get('include_artists')) else 1):
+            if per_artist.get(a, 0) >= (2 if a in included else 1):
                 continue
             seen.add(t['id'])
             per_artist[a] = per_artist.get(a, 0) + 1
             out.append((t, str(s.get('part') or '').strip()[:120], str(s.get('link') or '').strip()[:200]))
+        # Pins hold: a song he pinned is where it was, whatever the curator did with it.
+        for i, t in enumerate(keep or []):
+            if t.get('pinned'):
+                out = [x for x in out if x[0]['id'] != t['id']]
+                out.insert(min(i, len(out)), (dict(t), 'kept in place', ''))
         return out
+
+    def in_library(self, title, artist, builder):
+        """His own copy of a song, only when it is surely the same artist (a shared first word isn't)."""
+        t = self.cat.find(title, artist)
+        if t is None:
+            return None
+        ours, theirs = nartist(first_artist(artist)), nartist(t.get('artist'))
+        if not ours or not (ours == theirs or f' {ours} ' in f' {theirs} ' or f' {theirs} ' in f' {ours} '):
+            return None
+        return dict(t, pool=E.pool_of(t, builder.now) or ('new_known' if t.get('kind') == 'new_known' else t.get('kind') or 'new_frontier'))
 
     def library_song(self, artist, builder, seen):
         """His song by this artist that best fits the moment (the engine's choice: the measured familiarity curve)."""
@@ -233,29 +267,37 @@ Make the mix: its title, its thread, and its songs in order, each with its part 
             if s > best_s:
                 best, best_s = dict(t, pool=pool), s
         if best is None:  # every one resting, or a poor fit by the numbers: the thread asked for this voice, so his most played
-            mine = [t for t in self.cat.tracks if t.get('artist_key') in keys and t['id'] not in seen and builder.allowed(t)]
+            mine = [t for t in self.cat.tracks if t.get('artist_key') in keys and t['id'] not in seen and builder.allowed(t)
+                    and t['id'] not in builder.avoid and (not E.is_instrumental(builder.b) or E.instrumental_ok(t))]
             if mine:
                 t = max(mine, key=lambda x: x.get('plays') or 0)
                 best = dict(t, pool=E.pool_of(t, builder.now) or 'familiar')
         return best
 
     def anywhere(self, title, artist):
-        """A song he hasn't got, found in Apple's catalogue by its title and artist -> a track, or None."""
-        q = urllib.parse.urlencode({'term': f'{ntrack(title)} {first_artist(artist)}', 'entity': 'song', 'limit': 10, 'country': 'IN'})
-        try:
-            with urllib.request.urlopen(urllib.request.Request(f'https://itunes.apple.com/search?{q}',
-                                                               headers={'User-Agent': 'telly/2 (personal playlist app)'}), timeout=6) as r:
-                results = json.loads(r.read()).get('results') or []
-        except Exception:
-            return None
-        want_t, want_a = ntrack(title), nartist(first_artist(artist))
-        best, best_s = None, 0.0
-        for x in results:
-            ts = SequenceMatcher(None, want_t, ntrack(x.get('trackName') or '')).ratio()
-            names = nartist(x.get('artistName') or '')
-            a = 1.0 if want_a and f' {want_a} ' in f' {names} ' else SequenceMatcher(None, want_a, names).ratio()
-            if ts >= 0.85 and a >= 0.6 and ts + a > best_s:
-                best, best_s = x, ts + a
+        """A song he hasn't got, found in Apple's catalogue by its title and artist -> a track, or None. What Apple says
+        is kept for a month (found or not); when Apple refuses (403/429) it rests, and nothing is taken as missing."""
+        k = f'apple:{nartist(first_artist(artist))}|{ntrack(title)}'
+        hit = self.store.get(k) if self.store is not None else None
+        if hit is None or time.time() - hit.get('ts', 0) > APPLE_KEEP:
+            if APPLE_REST[0] > time.time():
+                return None
+            q = urllib.parse.urlencode({'term': f'{ntrack(title)} {first_artist(artist)}', 'entity': 'song', 'limit': 10, 'country': 'IN'})
+            try:
+                with urllib.request.urlopen(urllib.request.Request(f'https://itunes.apple.com/search?{q}',
+                                                                   headers={'User-Agent': 'telly/2 (personal playlist app)'}), timeout=5) as r:
+                    results = json.loads(r.read()).get('results') or []
+            except urllib.error.HTTPError as e:
+                if e.code in (403, 429):
+                    APPLE_REST[0] = time.time() + 300
+                return None
+            except Exception:
+                return None
+            time.sleep(0.25)  # Apple asks for about 20 a minute
+            hit = {'found': self._best(results, title, artist), 'ts': time.time()}
+            if self.store is not None:
+                self.store.put(k, hit)
+        best = hit.get('found')
         if not best:
             log.info('curator: %s by %s not found anywhere: dropped', title, artist)
             return None
@@ -263,6 +305,19 @@ Make the mix: its title, its thread, and its songs in order, each with its part 
         return dict(t, pool='curated', kind='curated', pinned=False, duration_ms=best.get('trackTimeMillis'),
                     year=(best.get('releaseDate') or '')[:4] or None, thumb=(best.get('artworkUrl100') or '').replace('100x100bb', '600x600bb') or None)
 
+    @staticmethod
+    def _best(results, title, artist):
+        want_t, want_a = ntrack(title), nartist(first_artist(artist))
+        best, best_s = None, 0.0
+        for x in results:
+            if not isinstance(x, dict):
+                continue
+            ts = SequenceMatcher(None, want_t, ntrack(x.get('trackName') or '')).ratio()
+            names = nartist(x.get('artistName') or '')
+            a = 1.0 if want_a and f' {want_a} ' in f' {names} ' else SequenceMatcher(None, want_a, names).ratio()
+            if ts >= 0.85 and a >= 0.75 and ts + a > best_s:
+                best, best_s = {k: x.get(k) for k in ('trackName', 'artistName', 'trackTimeMillis', 'releaseDate', 'artworkUrl100')}, ts + a
+        return best
 
 def fit_length(picks, minutes):
     """Trim a mix that runs long, from the end inward but never its closer: within a song of the time asked."""
@@ -274,10 +329,10 @@ def fit_length(picks, minutes):
     return picks
 
 
-def mixtape(curator, brief, moment, said, lens, hour, served, keep=None, instruction=None):
+def mixtape(curator, brief, moment, said, lens, hour, served, keep=None, instruction=None, deadline=None):
     """The curated mix -> (tracks, mix dict) or None (then the engine builds it, as before)."""
     try:
-        got = curator.choose(brief, moment, said, lens, hour, served, keep, instruction)
+        got = curator.choose(brief, moment, said, lens, hour, served, keep, instruction, deadline)
     except Exception as e:
         log.warning('curator unavailable: %s', str(e)[:160])
         return None
@@ -351,10 +406,14 @@ Rules:
               (f" | The song before, \"{tracks[i - 1]['title']}\" by {tracks[i - 1]['artist']}: " + (sources.get(tracks[i - 1]['id']) or 'nothing') if i else ''),
               raw[i]) for i in order]
     everything = ' | '.join(f"{t['title']} by {t['artist']}: {(sources.get(t['id']) or 'nothing')[:700]}" for t in tracks)
-    said_ok = settle(llm, pairs, words=34, limit=2600) if pairs else []
+    said_ok = settle(llm, pairs, words=34, limit=2600, opinions=True) if pairs else []
     notes = {tracks[i]['id']: said_ok[k] for k, i in enumerate(order) if said_ok[k]}
     # The opening and the last line may draw on any song: they're read against all the sources at once.
     raw = {k: ' '.join(str(out.get(k) or '').split()) for k in ('thread', 'intro', 'outro')}
     keys = [k for k in ('thread', 'intro', 'outro') if raw[k]]
-    framed = dict(zip(keys, settle(llm, [(everything, raw[k]) for k in keys], words=60, limit=9000))) if keys else {}
+    # The opening is about how the mix begins and the last line about how it ends: each is read against those songs
+    # (a long mix's sources together would be cut short before its closer).
+    ends = lambda ts: ' | '.join(f"{t['title']} by {t['artist']}: {(sources.get(t['id']) or 'nothing')[:1200]}" for t in ts)
+    against = {'thread': everything, 'intro': ends(tracks[:5]), 'outro': ends(tracks[-5:])}
+    framed = dict(zip(keys, settle(llm, [(against[k], raw[k]) for k in keys], words=60, limit=9000, opinions=True))) if keys else {}
     return {'thread': framed.get('thread', '')[:300], 'intro': framed.get('intro', ''), 'outro': framed.get('outro', ''), 'notes': notes}
