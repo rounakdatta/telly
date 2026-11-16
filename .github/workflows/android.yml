@@ -1,0 +1,65 @@
+name: Android
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ['server/**', 'tools/**', '.github/workflows/server.yml', 'README.md']
+  pull_request:
+    paths-ignore: ['server/**', 'tools/**', '.github/workflows/server.yml', 'README.md']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+
+      - uses: android-actions/setup-android@v3
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      # The screenshots are how the design gets looked at on every change: every screen at phone size, with
+      # real-looking data (app/src/test/.../ScreenshotTest.kt). They are uploaded as an artifact.
+      - name: Build the APK and photograph every screen
+        run: ./gradlew :app:assembleDebug :app:recordRoborazziDebug --no-daemon --stacktrace
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: screenshots
+          path: app/build/outputs/roborazzi/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apk
+          path: app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Name the release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        id: meta
+        run: |
+          echo "tag=build-$(date -u +%Y%m%d-%H%M%S)-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          mkdir -p out && cp app/build/outputs/apk/debug/app-debug.apk "out/telly-$(git rev-parse --short HEAD).apk"
+
+      - name: Publish the APK
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: telly ${{ steps.meta.outputs.tag }}
+          body: |
+            Debug-signed build of ${{ github.sha }}. Installs over any earlier telly (same key).
+          files: out/*.apk
+          make_latest: true

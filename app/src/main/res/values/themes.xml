@@ -1,8 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="Theme.Telly" parent="android:Theme.Material.Light.NoActionBar">
-        <item name="android:statusBarColor">@color/white</item>
-        <item name="android:navigationBarColor">@color/white</item>
-        <item name="android:windowLightStatusBar">true</item>
+    <!-- The window paints the same near-black as the app, so a cold start never flashes white. -->
+    <style name="Theme.Telly" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">#FF0A0A0B</item>
+        <item name="android:colorBackground">#FF0A0A0B</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
     </style>
 </resources>

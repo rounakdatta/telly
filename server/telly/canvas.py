@@ -1,0 +1,262 @@
+"""The day's canvas: one session per moment of the day, each a chain of versions. Every message, tweak or edit makes a
+new version, so nothing is lost and anything can be undone."""
+import datetime as dt
+import logging
+import threading
+import time
+
+from . import engine as E
+from . import interpret
+from .context import clock
+from .spotify import playlist_url as sp_url
+from .ytm import playlist_url as ytm_url
+
+log = logging.getLogger('telly')
+KEEP = ('id', 'title', 'artist', 'artist_key', 'pool', 'kind', 'world', 'origin', 'duration_ms', 'energy', 'tempo', 'danceability',
+        'acousticness', 'instrumentalness', 'speechiness', 'plays', 'days_played', 'first_ts', 'last_ts', 'liked', 'ytm_vid',
+        'spotify_uri', 'playcount', 'adjacency', 'artist_aff', 'pinned', 'since', 'skip', 'sp_streams', 'sp_skips')
+SHAPE = ('activity', 'minutes', 'familiar', 'energy', 'tempo', 'worlds', 'origins', 'include_artists', 'exclude_artists', 'instrumental',
+         'want')
+
+
+class NoCatalog(Exception):
+    pass
+
+
+def slim(tracks):
+    return [{k: t[k] for k in KEEP if t.get(k) is not None} for t in tracks]
+
+
+def day_label(day):
+    d = dt.date.fromisoformat(day)
+    return d.strftime('%A, %-d %B')
+
+
+class Canvas:
+    def __init__(self, store, catalogs, place, llm):
+        self.store, self.catalogs, self.place, self.llm = store, catalogs, place, llm
+        self.jobs = None
+        self.lock = threading.RLock()
+
+    @property
+    def about(self):
+        c = self.catalogs.get()
+        return (c.meta.get('about') if c else '') or ''
+
+    @property
+    def cat(self):
+        c = self.catalogs.get()
+        if c is None:
+            raise NoCatalog('no catalogue yet: upload one to /admin/catalog')
+        return c
+
+    # -- reading -------------------------------------------------------------------------------------------------------
+    def day(self, day):
+        sessions = [self.render(s) for s in self.store.sessions_on(day) if s['version'] > 0]
+        sessions.sort(key=lambda s: (s['start'] or '99:99', s['created']))
+        now = self.place.now()
+        return {'day': day, 'label': day_label(day), 'today': day == now.date().isoformat(),
+                'weather': self.place.weather(now.replace(minute=0)) if day == now.date().isoformat() else None,
+                'sessions': sessions}
+
+    def session(self, sid):
+        s = self.store.session(sid)
+        if not s or s['deleted'] or s['version'] == 0:
+            return None
+        return self.render(s)
+
+    def library(self, before, limit=14):
+        days = self.store.days_before(before, limit)
+        return {'days': [{'day': d, 'label': day_label(d), 'sessions': [self.render(s, brief_only=True) for s in self.store.sessions_on(d) if s['version'] > 0]}
+                         for d in days]}
+
+    def render(self, s, v=None, brief_only=False):
+        v = v or self.store.version(s['id'])
+        b, tracks = v['brief'], v['tracks']
+        cache = self.store.resolved([t['id'] for t in tracks])
+        rows = []
+        for i, t in enumerate(tracks):
+            r = cache.get(t['id']) or {}
+            vid = r.get('ytm_vid') or t.get('ytm_vid')
+            thumb = r.get('thumb') or (f'https://i.ytimg.com/vi/{vid}/mqdefault.jpg' if vid else None)
+            rows.append({'n': i + 1, 'id': t['id'], 'title': t['title'], 'artist': t['artist'], 'pool': t.get('pool'),
+                         'tag': E.TAG.get(t.get('pool'), ''), 'why': E.why(t), 'new': str(t.get('pool', '')).startswith('new'),
+                         'pinned': bool(t.get('pinned')), 'thumb': thumb, 'duration_s': round(E.dur_ms(t) / 1000),
+                         'ytm': vid, 'spotify': t.get('spotify_uri') or r.get('sp_uri')})
+        start = b.get('start')
+        story = s.get('story')
+        out = {
+            'id': s['id'], 'day': s['day'], 'title': s['title'], 'activity': b['activity'], 'start': start,
+            'start_label': clock(start) if start else None, 'minutes': b['minutes'],
+            'duration_min': round(E.duration_ms(tracks) / 60000), 'count': len(tracks),
+            'summary': E.summary(b, tracks), 'blurb': E.ACTIVITIES[b['activity']]['blurb'],
+            'brief': {k: b.get(k) for k in ('familiar', 'energy', 'worlds', 'origins', 'include_artists', 'exclude_artists', 'instrumental')},
+            'tracks': rows, 'version': v['n'], 'created': s['created'], 'updated': s['updated'],
+            'ytm': {'state': s.get('ytm_state') or 'pending', 'url': ytm_url(s['ytm_id']) if s.get('ytm_id') else None, 'error': s.get('ytm_error')},
+            'spotify': {'state': s.get('sp_state') or 'pending', 'url': sp_url(s['sp_id']) if s.get('sp_id') else None, 'error': s.get('sp_error')},
+            'story': self._story(s),
+        }
+        if start and s['day'] == self.place.today():
+            out['weather'] = self.place.weather(self.place.at(s['day'], start).replace(minute=0))
+        if not brief_only:
+            out['log'] = [{'at': h['created'], 'source': h['source'], 'said': h['said'], 'reply': h['reply']} for h in self.store.history(s['id'])]
+        return out
+
+    @staticmethod
+    def _story(s):
+        import json
+        st = s.get('story_state') or 'pending'
+        if s.get('story'):
+            d = json.loads(s['story'])
+            return {'state': 'ready', 'title': d.get('title'), 'body': d.get('body'), 'deeper': d.get('deeper'),
+                    'deeper_checked': d.get('deeper_checked', False), 'song_id': d.get('song_id')}
+        return {'state': st}
+
+    # -- writing -------------------------------------------------------------------------------------------------------
+    def prompt(self, day, text, focus=None):
+        """Read a message and apply it. Returns {'reply', 'focus', 'day'}."""
+        text = (text or '').strip()[:1000]
+        if not text:
+            return {'reply': None, 'focus': focus, 'day': self.day(day)}
+        canvas = [(s, self.store.version(s['id'])) for s in self.store.sessions_on(day) if s['version'] > 0]
+        if focus and not any(s['id'] == focus for s, _ in canvas):
+            focus = None
+        say, rough = None, False
+        try:
+            actions, say = interpret.plan(self.llm, self.about, self.place, day, canvas, focus, text)
+        except Exception as e:
+            log.warning('planner unavailable, using rules: %s', str(e)[:160])
+            focus_brief = next((v['brief'] for s, v in canvas if s['id'] == focus), None)
+            actions, tw = interpret.fallback(text, self.place, focus_brief)
+            rough = True
+            if tw and focus:
+                self.tweak(focus, tw, said=text)
+                return {'reply': E.TWEAK_REPLY[tw], 'focus': focus, 'day': self.day(day), 'rough': True}
+            if not actions:
+                return {'reply': "I can't read that right now (the language model is unreachable). The buttons still work.",
+                        'focus': focus, 'day': self.day(day), 'rough': True}
+        replies, last = [], focus
+        with self.lock:
+            ids = {s['id'] for s, _ in canvas}
+            for a in actions:
+                try:
+                    sid = self._apply(day, a, text, ids)
+                except NoCatalog:
+                    raise
+                except Exception:
+                    log.exception('could not apply %s', {k: a.get(k) for k in ('target', 'activity')})
+                    continue
+                if sid:
+                    last = sid
+                if a.get('reply'):
+                    replies.append(a['reply'].strip())
+        return {'reply': ' '.join(replies) or say or "I couldn't turn that into a change.", 'focus': last,
+                'day': self.day(day), 'rough': rough}
+
+    def _apply(self, day, a, text, ids):
+        cat = self.cat
+        target = a.get('target')
+        if target != 'new' and target not in ids:
+            target = 'new'
+        fields = {k: a[k] for k in ('activity', 'start', 'minutes', 'familiar', 'energy', 'tempo', 'worlds', 'origins',
+                                    'include_artists', 'exclude_artists', 'instrumental', 'title', 'want') if a.get(k) is not None}
+        if 'start' in fields and not _hhmm(fields['start']):
+            fields.pop('start')
+        if target == 'new':
+            if a.get('delete'):
+                return None
+            fields.setdefault('start', self.place.now().strftime('%H:%M'))
+            brief = E.normalize(fields)
+            sid = self.store.new_session(day, brief['title'])
+            order, _ = E.rebuild(cat, brief, int(brief['start'][:2]), [], self._served(sid))
+            self._save(sid, 'prompt', text, a.get('reply'), brief, order)
+            return sid
+        sid = target
+        if a.get('delete'):
+            self.delete(sid)
+            return None
+        v = self.store.version(sid)
+        brief = dict(v['brief'])
+        if fields.get('title'):
+            self.store.update_session(sid, title=fields['title'][:60])
+        new_brief = E.normalize({**brief, **fields, 'seed': brief['seed']})
+        tracks = v['tracks']
+        hour = int((new_brief.get('start') or '12:00')[:2])
+        notes = []
+        if a.get('ops'):
+            bl = E.Builder(cat, brief, hour, served=self._served(sid), prev=tracks)
+            tracks, after = E.apply_ops(cat, brief, tracks, a['ops'], bl, notes)
+            new_brief['avoid'] = after['avoid']
+        reshuffle = bool(a.get('reshuffle'))
+        if reshuffle:
+            new_brief['seed'] = E.normalize({'activity': new_brief['activity']})['seed']
+        if reshuffle or any(new_brief.get(k) != brief.get(k) for k in SHAPE):
+            tracks, _ = E.rebuild(cat, new_brief, hour, tracks, self._served(sid), sticky=not reshuffle)
+        reply = ' '.join([a.get('reply') or ''] + notes).strip()
+        if [t['id'] for t in tracks] == [t['id'] for t in v['tracks']] and new_brief == {**brief, 'avoid': new_brief['avoid']}:
+            reply = (' '.join(notes) or 'Nothing changed.')  # never claim an edit that didn't happen
+        a['reply'] = reply
+        self._save(sid, 'prompt', text, reply, new_brief, tracks)
+        return sid
+
+    def tweak(self, sid, name, said=None):
+        if name not in E.TWEAKS:
+            raise ValueError('unknown tweak')
+        with self.lock:
+            v = self.store.version(sid)
+            b = E.tweak(v['brief'], name)
+            hour = int((b.get('start') or '12:00')[:2])
+            tracks, _ = E.rebuild(self.cat, b, hour, v['tracks'], self._served(sid), sticky=name != 'reshuffle')
+            self._save(sid, 'tweak', said or E.TWEAKS[name], E.TWEAK_REPLY[name], b, tracks)
+        return self.session(sid)
+
+    def edit(self, sid, op, index, to=None):
+        with self.lock:
+            v = self.store.version(sid)
+            hour = int((v['brief'].get('start') or '12:00')[:2])
+            bl = E.Builder(self.cat, v['brief'], hour, served=self._served(sid), prev=v['tracks'])
+            t = v['tracks'][index]['title'] if 0 <= index < len(v['tracks']) else '?'
+            tracks, b = E.apply_ops(self.cat, v['brief'], v['tracks'], [{'op': op, 'index': index, 'to': to}], bl)
+            reply = {'remove': f'Removed {t}.', 'swap': f'Swapped out {t}.', 'pin': f'Keeping {t}.', 'unpin': f'{t} can change again.',
+                     'move': f'Moved {t}.'}.get(op, 'Done.')
+            self._save(sid, 'edit', f'{op} {t}', reply, b, tracks)
+        return self.session(sid)
+
+    def undo(self, sid):
+        with self.lock:
+            s = self.store.session(sid)
+            if not s or s['version'] < 2:
+                return self.session(sid)
+            prev = self.store.version(sid, s['version'] - 1)
+            self._save(sid, 'undo', 'Undo', 'Back to how it was.', prev['brief'], prev['tracks'])
+        return self.session(sid)
+
+    def delete(self, sid):
+        with self.lock:
+            self.store.update_session(sid, deleted=1)
+        if self.jobs:
+            self.jobs.push(sid)
+
+    def resync(self, sid):
+        if self.jobs:
+            self.jobs.push(sid)
+        return self.session(sid)
+
+    # -- helpers -------------------------------------------------------------------------------------------------------
+    def _served(self, sid):
+        return self.store.served_since(time.time() - 2 * 86400, exclude_session=sid)
+
+    def _save(self, sid, source, said, reply, brief, tracks):
+        self.store.add_version(sid, source, said, reply, brief, slim(tracks))
+        self.store.mark_served(sid, tracks)
+        self.store.update_session(sid, ytm_state='pending' if self.store.session(sid).get('ytm_state') != 'off' else 'off')
+        if self.jobs:
+            self.jobs.push(sid)
+
+
+def _hhmm(s):
+    try:
+        h, m = (int(x) for x in str(s).split(':')[:2])
+        return 0 <= h < 24 and 0 <= m < 60
+    except ValueError:
+        return False
