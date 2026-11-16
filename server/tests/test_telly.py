@@ -195,6 +195,13 @@ class EngineTest(Base):
         self.assertEqual(order[3]['id'], order2[3]['id'])
 
 
+def _verdicts(tool, user, ok=lambda n: True):
+    """The strict reader's answer, for stand-in models: every claim supported unless `ok` says otherwise."""
+    if tool['name'] != 'verdicts':
+        return None
+    return {'verdicts': [{'n': n, 'supported': ok(n)} for n in range(1, user.count('    Claim:') + 1)]}
+
+
 class _Pages:
     """Genius, for the notes tests: every song has a one-line story (no network)."""
     def page(self, title, artist):
@@ -213,6 +220,8 @@ class NotesTest(Base):
 
         class FakeLLM:
             def tool(self, system, user, tool, **kw):
+                if (v := _verdicts(tool, user)) is not None:
+                    return v
                 calls.append(user)
                 n = user.count('    Genius:')
                 return {'notes': [{'n': i, 'note': f'Listen for the bass line in song {i}.'} for i in range(1, n + 1)] +
@@ -235,6 +244,8 @@ class NotesTest(Base):
 
         class FakeLLM:
             def tool(self, system, user, tool, **kw):
+                if (v := _verdicts(tool, user)) is not None:
+                    return v
                 calls.append(user)
                 return {'notes': [{'n': i, 'note': f'Listen for the drums in this one, number {i}.'}
                                   for i in range(1, user.count('    Genius:') + 1)]}
@@ -259,7 +270,7 @@ class NotesTest(Base):
         tracks = [{'id': 'e1', 'title': 'Song', 'artist': 'Someone', 'pool': 'comfort', 'plays': 3}]
 
         class Empty:
-            def tool(self, *a, **k):
+            def tool(self, system, user, tool, **k):
                 return {'notes': []}
         real, N.snippet = N.snippet, lambda store, t: None
         try:
@@ -294,6 +305,8 @@ class NotesTest(Base):
 
         class Spy:
             def tool(self, system, user, tool, **kw):
+                if (v := _verdicts(tool, user)) is not None:
+                    return v
                 seen.append(user)
                 return {'notes': [{'n': 1, 'note': 'It was the last single the band made with Zayn Malik.'}, {'n': 2, 'note': ''}]}
 
@@ -308,6 +321,26 @@ class NotesTest(Base):
         self.assertNotIn('24', seen[0], "his play counts aren't given to the friend at all")
         self.assertIn('Zayn Malik', seen[0], "the song's Genius story is")
         self.assertEqual({'h1': 'It was the last single the band made with Zayn Malik.'}, got)
+
+    def test_a_note_that_says_more_than_its_source_is_not_said(self):
+        from telly import notes as N
+        store = Store(os.path.join(self.tmp.name, 'notes7.db'))
+        tracks = [{'id': 'w1', 'title': 'What A Time', 'artist': 'Julia Michaels'}, {'id': 'w2', 'title': 'Night Changes', 'artist': 'One Direction'}]
+
+        class Writer:
+            def tool(self, system, user, tool, **kw):
+                # the second note is the real slip from 17 Nov: two true facts joined into a cause the source never states
+                if (v := _verdicts(tool, user, ok=lambda n: 'which is how' not in user.split('[%d]' % n)[1].split('\n\n')[0])) is not None:
+                    return v
+                return {'notes': [{'n': 1, 'note': 'Julia Michaels opened Niall Horan\'s Flicker tour, which is how this duet came together.'},
+                                  {'n': 2, 'note': 'The last One Direction single released while Zayn Malik was still in the band.'}]}
+        real, N.snippet = N.snippet, lambda store, t: None
+        try:
+            got = N.write(Writer(), 'a listener', 'a walk', tracks, store, genius=PAGES)
+        finally:
+            N.snippet = real
+        self.assertEqual({'w2'}, set(got), 'the invented cause is dropped, the supported note kept')
+        self.assertEqual('', store.notes_for(['w1'])['w1'], 'and the song is remembered as having nothing to say')
 
     def test_notes_from_older_rules_are_dropped_once(self):
         from telly import notes as N
