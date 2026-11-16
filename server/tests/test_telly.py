@@ -170,6 +170,16 @@ class YtmParseTest(unittest.TestCase):
         self.assertIsNone(best_match({'title': 'Something Else Entirely', 'artist': 'Nobody'}, rows))
 
 
+class StorySourceTest(unittest.TestCase):
+    def test_a_source_must_name_the_song_or_the_artist(self):
+        from telly.story import relevant
+        teri = {'title': 'Teri Ay', 'artist': 'Umer Farooq'}
+        # what actually happened: a search for the song returned a ghazal singer's page, and 'ay' matched inside words
+        self.assertFalse(relevant(teri, ('Munni Begum', 'Munni Begum (born Nadira Begum) is a Pakistani ghazal singer of the Ayub era.')))
+        self.assertTrue(relevant(teri, ('Umer Farooq (musician)', 'Umer Farooq is a Pakistani singer-songwriter.')))
+        self.assertTrue(relevant({'title': 'Kun Faya Kun', 'artist': 'A.R. Rahman'}, ('Kun Faya Kun', 'Kun Faya Kun is a Sufi song from Rockstar.')))
+
+
 class ApiTest(Base):
     """The HTTP surface, with no language model reachable (the rules stand in)."""
 

@@ -52,6 +52,25 @@ def wiki(query):
         return None
 
 
+def _plain(s):
+    import unicodedata
+    s = ''.join(c for c in unicodedata.normalize('NFKD', s or '') if not unicodedata.combining(c)).lower()
+    return ' '.join(re.sub(r'[^\w\s]', ' ', s).split())
+
+
+def relevant(t, hit):
+    """Is this article really about the song or its artist? Its title or opening must name the whole song title (four
+    letters or more) or the artist's full name. Words alone are not enough: 'Teri Ay' once matched an article on
+    Munni Begum because 'ay' is inside so many words."""
+    title, opening = _plain(hit[0]), _plain(hit[1][:900])
+    from .textnorm import ntrack
+    song = _plain(ntrack(t['title']))
+    artist = _plain(t.get('artist'))
+    if len(song) >= 4 and (song in title or f' {song} ' in f' {opening} '):
+        return True
+    return len(artist) >= 4 and (artist in title or f' {artist} ' in f' {opening} ')
+
+
 def sources_for(tracks, avoid_text, limit=4):
     cands = [t for t in sorted(tracks, key=lambda t: ORDER.get(t.get('pool'), 9)) if (t.get('artist') or '').lower() not in avoid_text][:8]
     found = []
@@ -60,7 +79,7 @@ def sources_for(tracks, avoid_text, limit=4):
         for q in (f"{t['title']} {t['artist']} song", f"{t['title']} song", f"{t['artist']} musician"):
             hit = wiki(q)
             time.sleep(0.8)
-            if hit and (any(w in hit[1].lower() for w in t['title'].lower().split()[:2]) or t['artist'].split(' ')[0].lower() in hit[1].lower()):
+            if hit and relevant(t, hit):
                 break
             hit = None
         if hit:
