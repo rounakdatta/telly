@@ -40,6 +40,10 @@ data class LyricsResult(
     val unchanged: Boolean = false,
     /** The song's cover (Apple's, 600 px), when it was found. */
     val art: String? = null,
+    /** A song with no timed words: its words, line by line ("" between verses). */
+    val plain: List<String> = emptyList(),
+    /** Whose words: lrclib | lrc.red | megalobiz | simpmusic. */
+    val source: String? = null,
 ) {
     /** Worth asking again: its lyrics are still being found, its words timed, or its notes read. */
     val settling: Boolean
