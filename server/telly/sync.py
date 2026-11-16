@@ -277,7 +277,8 @@ class Worker(threading.Thread):
         callbacks = past[:6] if random.Random(sid).random() < 0.35 else []
         try:
             avoid = [p[1] for p in past[:30]] + [p[3] for p in past[:30]]
-            st = story_mod.write(llm, self.canvas.about, moment, v['tracks'], avoid, lens=lens, callbacks=[p[:3] for p in callbacks])
+            st = story_mod.write(llm, self.canvas.about, moment, v['tracks'], avoid, lens=lens, callbacks=[p[:3] for p in callbacks],
+                                 home=place.name)
         except Exception as e:
             log.warning('story %s: %s', sid, str(e)[:200])
             st = None
