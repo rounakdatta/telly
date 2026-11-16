@@ -495,14 +495,15 @@ def apply_ops(cat, brief, tracks, ops, builder, notes=None):
             tracks[i] = None
         elif kind == 'swap':
             old = tracks[i]
-            brief['avoid'].append(old['id'])
             builder.avoid.add(old['id'])
             prev_e = next((t.get('energy') for t in tracks[max(0, i - 1):i] if t and t.get('energy') is not None), None)
             new = builder.replacement(old, {t['id'] for t in tracks if t}, old.get('energy') if old.get('energy') is not None else prev_e)
             if new:
                 tracks[i] = new
+                brief['avoid'].append(old['id'])  # only once it is really gone: a failed swap keeps the song
             else:
-                notes.append(f"Nothing else fits in place of {old['title']}.")
+                builder.avoid.discard(old['id'])
+                notes.append(f"Nothing else fits in place of {old['title']}, so it stays.")
         elif kind in ('pin', 'unpin'):
             tracks[i]['pinned'] = kind == 'pin'
         elif kind == 'move':
@@ -533,12 +534,14 @@ def rebuild(cat, brief, hour, prev_tracks, served, sticky=True, now=None):
     bl = Builder(cat, brief, hour, now=now, served=served, prev=prev_tracks, sticky=sticky)
     pins = [t for t in prev_tracks if t.get('pinned')]
     order = bl.build(pins=pins)
-    # put pinned songs back at the place they held
-    for t in pins:
-        cur = next((j for j, x in enumerate(order) if x['id'] == t['id']), None)
-        want = next((j for j, x in enumerate(prev_tracks) if x['id'] == t['id']), None)
-        if cur is not None and want is not None and cur != want:
-            order.insert(min(want, len(order) - 1), order.pop(cur))
+    # Put pinned songs back at the places they held. Take them all out first, then insert in order of position, so
+    # one pin's move can't shift another's.
+    places = sorted(((next((j for j, x in enumerate(prev_tracks) if x['id'] == t['id'])), t['id']) for t in pins))
+    pinned = {x['id']: x for x in order if x['id'] in {pid for _, pid in places}}
+    order = [x for x in order if x['id'] not in pinned]
+    for want, pid in places:
+        if pid in pinned:
+            order.insert(min(want, len(order)), pinned[pid])
     return order, bl
 
 

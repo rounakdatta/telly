@@ -90,8 +90,11 @@ class Canvas:
             'duration_min': round(E.duration_ms(tracks) / 60000), 'count': len(tracks),
             'summary': E.summary(b, tracks), 'blurb': E.ACTIVITIES[b['activity']]['blurb'],
             'brief': {k: b.get(k) for k in ('familiar', 'energy', 'worlds', 'origins', 'include_artists', 'exclude_artists', 'instrumental')},
-            'tracks': rows, 'version': v['n'], 'created': s['created'], 'updated': s['updated'],
-            'ytm': {'state': s.get('ytm_state') or 'pending', 'url': ytm_url(s['ytm_id']) if s.get('ytm_id') else None, 'error': s.get('ytm_error')},
+            'tracks': rows, 'version': v['n'], 'can_undo': bool(v.get('parent')), 'created': s['created'], 'updated': s['updated'],
+            'ytm': {'state': s.get('ytm_state') or 'pending', 'url': ytm_url(s['ytm_id']) if s.get('ytm_id') else None,
+                    'play': (f"https://music.youtube.com/watch?v={rows[0]['ytm']}&list={s['ytm_id']}" if s.get('ytm_id') and rows and rows[0]['ytm']
+                             else (ytm_url(s['ytm_id']) if s.get('ytm_id') else None)),
+                    'error': s.get('ytm_error')},
             'spotify': {'state': s.get('sp_state') or 'pending', 'url': sp_url(s['sp_id']) if s.get('sp_id') else None, 'error': s.get('sp_error')},
             'story': self._story(s),
         }
@@ -162,8 +165,10 @@ class Canvas:
             target = 'new'
         fields = {k: a[k] for k in ('activity', 'start', 'minutes', 'familiar', 'energy', 'tempo', 'worlds', 'origins',
                                     'include_artists', 'exclude_artists', 'instrumental', 'title', 'want') if a.get(k) is not None}
-        if 'start' in fields and not _hhmm(fields['start']):
-            fields.pop('start')
+        if 'start' in fields:
+            fields['start'] = _hhmm(fields['start'])
+            if not fields['start']:
+                fields.pop('start')
         if target == 'new':
             if a.get('delete'):
                 return None
@@ -181,7 +186,11 @@ class Canvas:
         brief = dict(v['brief'])
         if fields.get('title'):
             self.store.update_session(sid, title=fields['title'][:60])
-        new_brief = E.normalize({**brief, **fields, 'seed': brief['seed']})
+        base = dict(brief)
+        if fields.get('activity') and fields['activity'] != brief['activity']:
+            for k in ('energy', 'familiar', 'tempo', 'instrumental'):
+                base.pop(k, None)  # "make it a run" means a run's arc, not the walk's
+        new_brief = E.normalize({**base, **fields, 'seed': brief['seed']})
         tracks = v['tracks']
         hour = int((new_brief.get('start') or '12:00')[:2])
         notes = []
@@ -195,7 +204,8 @@ class Canvas:
         if reshuffle or any(new_brief.get(k) != brief.get(k) for k in SHAPE):
             tracks, _ = E.rebuild(cat, new_brief, hour, tracks, self._served(sid), sticky=not reshuffle)
         reply = ' '.join([a.get('reply') or ''] + notes).strip()
-        if [t['id'] for t in tracks] == [t['id'] for t in v['tracks']] and new_brief == {**brief, 'avoid': new_brief['avoid']}:
+        shape = lambda ts: [(t['id'], bool(t.get('pinned'))) for t in ts]
+        if shape(tracks) == shape(v['tracks']) and new_brief == {**brief, 'avoid': new_brief['avoid']}:
             reply = (' '.join(notes) or 'Nothing changed.')  # never claim an edit that didn't happen
         a['reply'] = reply
         self._save(sid, 'prompt', text, reply, new_brief, tracks)
@@ -212,25 +222,44 @@ class Canvas:
             self._save(sid, 'tweak', said or E.TWEAKS[name], E.TWEAK_REPLY[name], b, tracks)
         return self.session(sid)
 
-    def edit(self, sid, op, index, to=None):
+    def edit(self, sid, op, index, to=None, track_id=None):
         with self.lock:
             v = self.store.version(sid)
+            tracks = v['tracks']
+            if track_id is not None:
+                # The list on the phone may be a version behind: the id decides which song, the index only hints.
+                if not (0 <= index < len(tracks) and tracks[index]['id'] == track_id):
+                    index = next((i for i, t in enumerate(tracks) if t['id'] == track_id), -1)
+            if not 0 <= index < len(tracks):
+                return self.session(sid)
+            if op == 'move' and not isinstance(to, int):
+                return self.session(sid)
             hour = int((v['brief'].get('start') or '12:00')[:2])
-            bl = E.Builder(self.cat, v['brief'], hour, served=self._served(sid), prev=v['tracks'])
-            t = v['tracks'][index]['title'] if 0 <= index < len(v['tracks']) else '?'
-            tracks, b = E.apply_ops(self.cat, v['brief'], v['tracks'], [{'op': op, 'index': index, 'to': to}], bl)
-            reply = {'remove': f'Removed {t}.', 'swap': f'Swapped out {t}.', 'pin': f'Keeping {t}.', 'unpin': f'{t} can change again.',
-                     'move': f'Moved {t}.'}.get(op, 'Done.')
-            self._save(sid, 'edit', f'{op} {t}', reply, b, tracks)
-        return self.session(sid)
+            bl = E.Builder(self.cat, v['brief'], hour, served=self._served(sid), prev=tracks)
+            t = tracks[index]['title']
+            notes = []
+            new, b = E.apply_ops(self.cat, v['brief'], tracks, [{'op': op, 'index': index, 'to': to}], bl, notes)
+            if notes:
+                reply = ' '.join(notes)
+            else:
+                reply = {'remove': f'Removed {t}.', 'swap': f'Swapped {t} for {new[index]["title"] if index < len(new) else "another"}.',
+                         'pin': f'Keeping {t}.', 'unpin': f'{t} can change again.', 'move': f'Moved {t}.'}.get(op, 'Done.')
+            if [(x['id'], bool(x.get('pinned'))) for x in new] == [(x['id'], bool(x.get('pinned'))) for x in tracks]:
+                # nothing changed: no new version, just the honest note
+                return dict(self.session(sid), note=reply)
+            self._save(sid, 'edit', f'{op} {t}', reply, b, new)
+        return dict(self.session(sid), note=reply)
 
     def undo(self, sid):
         with self.lock:
-            s = self.store.session(sid)
-            if not s or s['version'] < 2:
+            cur = self.store.version(sid)
+            if not cur or not cur.get('parent'):
                 return self.session(sid)
-            prev = self.store.version(sid, s['version'] - 1)
-            self._save(sid, 'undo', 'Undo', 'Back to how it was.', prev['brief'], prev['tracks'])
+            prev = self.store.version(sid, cur['parent'])
+            self.store.add_version(sid, 'undo', 'Undo', 'Back to how it was.', prev['brief'], prev['tracks'], parent=prev.get('parent') or 0)
+            self.store.mark_served(sid, prev['tracks'])
+            self.store.update_session(sid, ytm_state='pending' if self.store.session(sid).get('ytm_state') != 'off' else 'off')
+            self.store.enqueue(sid)
         return self.session(sid)
 
     def delete(self, sid):
@@ -239,6 +268,10 @@ class Canvas:
         self.store.enqueue(sid)
 
     def resync(self, sid):
+        s = self.store.session(sid)
+        if not s or s['deleted']:
+            return None
+        self.store.update_session(sid, **{k: 'pending' for k in ('ytm_state', 'sp_state') if s.get(k) not in (None, 'off')})
         self.store.enqueue(sid)
         return self.session(sid)
 
@@ -279,8 +312,9 @@ def lens_ideas(day, n=5):
 
 
 def _hhmm(s):
+    """'7:00' -> '07:00'; anything that isn't a time of day -> None."""
     try:
         h, m = (int(x) for x in str(s).split(':')[:2])
-        return 0 <= h < 24 and 0 <= m < 60
     except ValueError:
-        return False
+        return None
+    return f'{h:02d}:{m:02d}' if 0 <= h < 24 and 0 <= m < 60 else None

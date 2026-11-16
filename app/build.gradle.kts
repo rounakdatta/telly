@@ -20,21 +20,26 @@ android {
         versionName = "2.0.0"
     }
 
-    // Pin the debug signing config to a keystore checked into the repo so every build (local + CI) produces an APK
-    // signed with the same cert. Without this, GitHub Actions generates a fresh debug.keystore per run and Android
-    // refuses to update across signatures. The credentials are Android's well-known debug defaults.
+    // Releases are signed with telly's own key, kept only in GitHub's encrypted secrets (backed up in Bitwarden as
+    // telly/android_release_keystore). It used to be the debug key checked into this public repo, which meant anyone
+    // could sign an "update" that installs over telly and reads its token. Debug builds (CI screenshots) use the
+    // throwaway key the build tools generate.
+    val releaseKeystore = System.getenv("TELLY_KEYSTORE")
     signingConfigs {
-        getByName("debug") {
-            storeFile = file("debug.keystore")
-            storePassword = "android"
-            keyAlias = "androiddebugkey"
-            keyPassword = "android"
+        if (releaseKeystore != null) {
+            create("release") {
+                storeFile = file(releaseKeystore)
+                storePassword = System.getenv("TELLY_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("TELLY_KEY_ALIAS")
+                keyPassword = System.getenv("TELLY_KEYSTORE_PASSWORD")
+            }
         }
     }
 
     buildTypes {
         release {
             isMinifyEnabled = false
+            if (releaseKeystore != null) signingConfig = signingConfigs.getByName("release")
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
     }

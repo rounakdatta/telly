@@ -3,6 +3,7 @@ package club.taptappers.telly.data
 import android.content.Context
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -26,7 +27,7 @@ class TellyError(message: String) : Exception(message)
 class Api(private val prefs: Prefs) {
     private val http = OkHttpClient.Builder()
         .connectTimeout(8, TimeUnit.SECONDS)
-        .readTimeout(90, TimeUnit.SECONDS) // a message goes through the language model; it can take a while
+        .readTimeout(120, TimeUnit.SECONDS) // a message goes through the language model; the server gives up first
         .build()
     private val jsonType = "application/json; charset=utf-8".toMediaType()
 
@@ -41,30 +42,47 @@ class Api(private val prefs: Prefs) {
     suspend fun setLens(text: String, day: String = "today"): Day = post("/api/day/$day/lens", buildJsonObject { put("text", text) })
 
     suspend fun tweak(id: String, tweak: String): Session = post("/api/session/$id/tweak", buildJsonObject { put("tweak", tweak) })
-    suspend fun edit(id: String, op: String, index: Int): Session =
-        post("/api/session/$id/edit", buildJsonObject { put("op", op); put("index", index) })
+    suspend fun edit(id: String, op: String, index: Int, trackId: String): Session =
+        post("/api/session/$id/edit", buildJsonObject { put("op", op); put("index", index); put("id", trackId) })
     suspend fun undo(id: String): Session = post("/api/session/$id/undo", JsonObject(emptyMap()))
     suspend fun resync(id: String): Session = post("/api/session/$id/sync", JsonObject(emptyMap()))
     suspend fun delete(id: String) {
-        call(Request.Builder().url(url("/api/session/$id")).delete().build())
+        call { url -> Request.Builder().url(url("/api/session/$id")).delete().build() }
     }
 
     private suspend inline fun <reified T> get(path: String): T =
-        json.decodeFromString(call(Request.Builder().url(url(path)).get().build()))
+        decode(call { url -> Request.Builder().url(url(path)).get().build() })
 
     private suspend inline fun <reified T> post(path: String, body: JsonObject): T =
-        json.decodeFromString(call(Request.Builder().url(url(path)).post(body.toString().toRequestBody(jsonType)).build()))
+        decode(call { url -> Request.Builder().url(url(path)).post(body.toString().toRequestBody(jsonType)).build() })
 
-    private fun url(path: String) = prefs.server.trimEnd('/') + path
+    private inline fun <reified T> decode(body: String): T = try {
+        json.decodeFromString(body)
+    } catch (e: SerializationException) {
+        throw TellyError("The server sent something this version of telly doesn't understand.")
+    } catch (e: IllegalArgumentException) {
+        throw TellyError("The server sent something this version of telly doesn't understand.")
+    }
 
-    private suspend fun call(req: Request): String = withContext(Dispatchers.IO) {
-        val authed = req.newBuilder().header("Authorization", "Bearer ${prefs.token}").build()
+    /**
+     * Every failure becomes a TellyError worded for a person, including the ones that happen before anything is sent:
+     * a malformed address or a token with a stray character must show a message, never crash the app on every launch.
+     */
+    private suspend fun call(build: ((String) -> String) -> Request): String = withContext(Dispatchers.IO) {
+        val base = prefs.server.trim().trimEnd('/')
+        if (!base.startsWith("https://")) throw TellyError("The server address must start with https://. Check it in Settings.")
+        val authed = try {
+            build { path -> base + path }.newBuilder().header("Authorization", "Bearer ${prefs.token}").build()
+        } catch (e: IllegalArgumentException) {
+            throw TellyError("That server address or token isn't valid. Check them in Settings.")
+        }
         try {
             http.newCall(authed).execute().use { r ->
                 val body = r.body?.string().orEmpty()
                 when {
                     r.isSuccessful -> body
                     r.code == 401 -> throw TellyError("The server didn't accept the token. Check it in Settings.")
+                    r.code == 429 -> throw TellyError(errorOf(body) ?: "That's a lot of requests. Give it a few minutes.")
                     r.code == 503 -> throw TellyError(errorOf(body) ?: "The server isn't ready yet.")
                     else -> throw TellyError(errorOf(body) ?: "The server answered ${r.code}.")
                 }
@@ -79,6 +97,8 @@ class Api(private val prefs: Prefs) {
             throw TellyError("The server is taking too long. Try again in a moment.")
         } catch (e: IOException) {
             throw TellyError("No connection to the server right now.")
+        } catch (e: IllegalArgumentException) {
+            throw TellyError("That server address or token isn't valid. Check them in Settings.")
         }
     }
 

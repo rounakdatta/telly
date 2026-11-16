@@ -15,6 +15,8 @@ Environment:
 import argparse
 import logging
 import os
+import signal
+import sys
 
 from .api import AdminApp, Catalogs, PublicApp, serve
 from .canvas import Canvas
@@ -34,6 +36,8 @@ def main():
     ap.add_argument('--port', type=int)
     a = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
+    # PID 1 in the container: without a handler SIGTERM is ignored and every rollout waits out the grace period.
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     os.makedirs(a.data, exist_ok=True)
     store = Store(os.path.join(a.data, 'telly.db'))
     catalogs = Catalogs(os.path.join(a.data, 'catalog.db'))

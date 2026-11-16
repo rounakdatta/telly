@@ -31,15 +31,17 @@ class Place:
 
     def forecast(self):
         with self._lock:
-            if self._wx and time.time() - self._wx_at < 1800:
+            # A good forecast is kept half an hour; a failure is remembered for five minutes, so an unreachable
+            # weather service costs one timeout per five minutes rather than one per call.
+            if time.time() - self._wx_at < (1800 if self._wx else 300):
                 return self._wx
             q = urllib.parse.urlencode({'latitude': self.lat, 'longitude': self.lon, 'timezone': 'auto', 'forecast_days': 3,
                                         'hourly': 'temperature_2m,precipitation_probability,weather_code', 'daily': 'sunrise,sunset'})
             try:
-                with urllib.request.urlopen(f'https://api.open-meteo.com/v1/forecast?{q}', timeout=10) as r:
+                with urllib.request.urlopen(f'https://api.open-meteo.com/v1/forecast?{q}', timeout=6) as r:
                     self._wx, self._wx_at = json.loads(r.read()), time.time()
             except Exception:
-                self._wx_at = time.time() - 1500  # retry in five minutes
+                self._wx_at = time.time()
             return self._wx
 
     def weather(self, when):

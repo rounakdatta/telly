@@ -102,8 +102,9 @@ fun App(model: TellyModel) {
                         PlaylistScreen(s, st.working, haze, PlaylistActions(
                             onBack = model::back, onOpenUrl = openUrl,
                             onTweak = { model.tweak(s.id, it) }, onUndo = { model.undo(s.id) },
-                            onSwap = { model.swap(s.id, it) }, onRemove = { model.remove(s.id, it) },
-                            onPin = { i, on -> model.pin(s.id, i, on) }, onResync = { model.resync(s.id) },
+                            onSwap = { i -> s.tracks.getOrNull(i)?.let { model.swap(s.id, i, it.id) } },
+                            onRemove = { i -> s.tracks.getOrNull(i)?.let { model.remove(s.id, i, it.id) } },
+                            onPin = { i, on -> s.tracks.getOrNull(i)?.let { model.pin(s.id, i, it.id, on) } }, onResync = { model.resync(s.id) },
                             onDelete = { model.delete(s.id) },
                         ), bottomSpace = composerSpace)
                     } else {
@@ -111,7 +112,8 @@ fun App(model: TellyModel) {
                     }
                 }
                 Screen.Library -> LibraryScreen(st.library, st.libraryLoaded, onBack = model::back,
-                    onOpen = { model.open(Screen.Playlist(it.id)) }, onSettings = { model.open(Screen.Settings) })
+                    onOpen = { model.open(Screen.Playlist(it.id)) }, onSettings = { model.open(Screen.Settings) },
+                    onMore = if (st.libraryEnd) null else ({ model.loadLibrary(more = true) }))
                 Screen.Settings -> SettingsScreen(false, model.server, model.token, st.status, st.statusLoading, st.statusError,
                     model::connect, onBack = model::back)
             }
@@ -127,7 +129,7 @@ fun App(model: TellyModel) {
                 text = draft, onText = { draft = it },
                 placeholder = if (top is Screen.Playlist) "Change this playlist…" else "What's today?",
                 sending = st.sending,
-                onSend = { model.send(draft); draft = "" },
+                onSend = { val said = draft; model.send(said) { ok -> if (ok && draft == said) draft = "" } },
                 onMic = mic, haze = haze, note = st.note, onNoteTap = model::clearNote,
                 modifier = Modifier.align(Alignment.BottomCenter).navigationBarsPadding().imePadding(),
             )

@@ -148,7 +148,7 @@ private fun Hero(s: Session) {
 private fun PlayRow(s: Session, working: String?, actions: PlaylistActions) {
     Column(Modifier.fillMaxWidth().padding(top = 22.dp, start = 20.dp, end = 20.dp), horizontalAlignment = Alignment.CenterHorizontally) {
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            val ytm = s.ytm.url
+            val ytm = s.ytm.play ?: s.ytm.url
             if (ytm != null) {
                 PrimaryPill("Play", R.drawable.ic_ytmusic, onClick = { actions.onOpenUrl(ytm) })
             } else if (s.ytm.state in setOf("pending", "syncing")) {
@@ -194,7 +194,7 @@ private fun Tweaks(s: Session, working: String?, actions: PlaylistActions) {
         Modifier.padding(top = 20.dp, bottom = 12.dp), contentPadding = PaddingValues(horizontal = 20.dp),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        if (s.version > 1) {
+        if (s.canUndo) {
             item(key = "undo") { Chip("Undo", { actions.onUndo() }, icon = R.drawable.ic_undo, busy = working == "undo", enabled = working == null) }
         }
         TWEAKS.forEach { (key, label) ->

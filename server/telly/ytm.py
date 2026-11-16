@@ -154,7 +154,9 @@ class YTM:
             except http.cookies.CookieError:
                 continue
             for name, m in c.items():
-                if m['max-age'] == '0' or m.value in ('', 'EXPIRED'):
+                # Only rotate cookies the session already has: Set-Cookie attributes Python doesn't know ('Priority=HIGH')
+                # parse as cookies of their own and must not join the jar.
+                if name not in self.cookies or m['max-age'] == '0' or m.value in ('', 'EXPIRED'):
                     continue
                 if self.cookies.get(name) != m.value:
                     self.cookies[name] = m.value
@@ -229,6 +231,16 @@ class YTM:
                 cont = next(iter(_walk(items, 'continuationCommand')), None)
             break
         return rows
+
+    def exists(self, playlist_id):
+        """Is this playlist still there? (Someone may have deleted it in YouTube Music.)"""
+        try:
+            d = self.call('browse', {'browseId': 'VL' + playlist_id})
+        except AuthError:
+            raise
+        except Exception:
+            return True  # can't tell: assume it is, and let the caller report the error rather than make a duplicate
+        return any(True for _ in _walk(d, 'musicPlaylistShelfRenderer')) or any(True for _ in _walk(d, 'musicEditablePlaylistDetailHeaderRenderer'))
 
     def edit(self, playlist_id, actions):
         d = self.call('browse/edit_playlist', {'playlistId': playlist_id, 'actions': actions})

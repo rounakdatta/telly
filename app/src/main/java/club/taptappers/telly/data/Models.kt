@@ -32,6 +32,9 @@ data class Session(
     val blurb: String = "",
     val tracks: List<Track> = emptyList(),
     val version: Int = 1,
+    @SerialName("can_undo") val canUndo: Boolean = false,
+    /** What the server says about the last edit, when it is worth saying ("Nothing else fits, so it stays."). */
+    val note: String? = null,
     val ytm: Remote = Remote(),
     val spotify: Remote = Remote(),
     val story: Story = Story(),
@@ -81,7 +84,13 @@ data class Track(
 }
 
 @Serializable
-data class Remote(val state: String = "pending", val url: String? = null, val error: String? = null)
+data class Remote(
+    val state: String = "pending",
+    val url: String? = null,
+    /** Starts the first song with the whole playlist queued, in the YouTube Music app. */
+    val play: String? = null,
+    val error: String? = null,
+)
 
 @Serializable
 data class Story(

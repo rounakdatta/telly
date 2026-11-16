@@ -144,7 +144,8 @@ def render_context(place, day, canvas, focus, lens=None):
 def plan(llm, about, place, day, canvas, focus, text, lens=None):
     """-> (actions, say, lens) where lens is the new subject, '' to clear it, or None for no change."""
     user = render_context(place, day, canvas, focus, lens) + f'\n\nHe typed: "{text}"'
-    out = llm.tool(system_prompt(about), user, TOOL, max_tokens=1500, timeout=60, retries=1, wait=3)
+    # At most ~85 s even with one retry, inside the app's 120 s wait.
+    out = llm.tool(system_prompt(about), user, TOOL, max_tokens=1500, timeout=40, retries=1, wait=3)
     acts = [a for a in out.get('actions') or [] if isinstance(a, dict) and a.get('target')]
     for a in acts:
         for op in a.get('ops') or []:

@@ -45,17 +45,21 @@ jobs:
           name: screenshots
           path: app/build/outputs/roborazzi/
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: apk
-          path: app/build/outputs/apk/debug/app-debug.apk
-
-      - name: Name the release
+      # Releases only from main, signed with telly's own key (encrypted secrets; never on pull requests).
+      - name: Build the signed release
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        id: meta
+        env:
+          TELLY_KEYSTORE_B64: ${{ secrets.TELLY_KEYSTORE_B64 }}
+          TELLY_KEYSTORE_PASSWORD: ${{ secrets.TELLY_KEYSTORE_PASSWORD }}
+          TELLY_KEY_ALIAS: ${{ secrets.TELLY_KEY_ALIAS }}
         run: |
+          export TELLY_KEYSTORE="$RUNNER_TEMP/telly-release.jks"
+          echo "$TELLY_KEYSTORE_B64" | base64 -d > "$TELLY_KEYSTORE"
+          ./gradlew :app:assembleRelease --no-daemon --stacktrace
+          rm -f "$TELLY_KEYSTORE"
+          mkdir -p out && cp app/build/outputs/apk/release/app-release.apk "out/telly-$(git rev-parse --short HEAD).apk"
           echo "tag=build-$(date -u +%Y%m%d-%H%M%S)-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
-          mkdir -p out && cp app/build/outputs/apk/debug/app-debug.apk "out/telly-$(git rev-parse --short HEAD).apk"
+        id: meta
 
       - name: Publish the APK
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -64,6 +68,6 @@ jobs:
           tag_name: ${{ steps.meta.outputs.tag }}
           name: telly ${{ steps.meta.outputs.tag }}
           body: |
-            Debug-signed build of ${{ github.sha }}. Installs over any earlier telly (same key).
+            Release build of ${{ github.sha }}, signed with telly's own key.
           files: out/*.apk
           make_latest: true

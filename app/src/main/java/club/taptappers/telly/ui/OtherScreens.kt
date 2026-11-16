@@ -56,7 +56,8 @@ import java.util.Locale
 // -- earlier days ---------------------------------------------------------------------------------------------------
 
 @Composable
-fun LibraryScreen(days: List<LibraryDay>, loaded: Boolean, onBack: () -> Unit, onOpen: (Session) -> Unit, onSettings: () -> Unit) {
+fun LibraryScreen(days: List<LibraryDay>, loaded: Boolean, onBack: () -> Unit, onOpen: (Session) -> Unit, onSettings: () -> Unit,
+                  onMore: (() -> Unit)? = null) {
     val top = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
     val bottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
     Box(Modifier.fillMaxSize()) {
@@ -83,6 +84,11 @@ fun LibraryScreen(days: List<LibraryDay>, loaded: Boolean, onBack: () -> Unit, o
                     Text(d.label, style = T.headline, color = C.text, modifier = Modifier.padding(start = 22.dp, end = 22.dp, top = 22.dp, bottom = 6.dp))
                 }
                 items(d.sessions, key = { it.id }) { s -> LibraryRow(s, onClick = { onOpen(s) }) }
+            }
+            if (onMore != null && days.isNotEmpty()) {
+                item(key = "more") {
+                    Chip("Show earlier days", onClick = onMore, modifier = Modifier.padding(horizontal = 22.dp, vertical = 18.dp))
+                }
             }
         }
     }

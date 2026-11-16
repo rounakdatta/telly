@@ -35,6 +35,7 @@ data class UiState(
     val sessions: Map<String, Session> = emptyMap(),
     val library: List<LibraryDay> = emptyList(),
     val libraryLoaded: Boolean = false,
+    val libraryEnd: Boolean = false,
     val sending: Boolean = false,
     val working: String? = null,
     val note: Note? = null,
@@ -65,6 +66,7 @@ class TellyModel(app: Application) : AndroidViewModel(app) {
 
     // -- navigation ---------------------------------------------------------------------------------------------------
     fun open(screen: Screen) {
+        if (_state.value.top == screen) return // a double tap opens it once
         _state.update { it.copy(stack = it.stack + screen, note = null) }
         when (screen) {
             is Screen.Playlist -> refreshSession(screen.id)
@@ -115,11 +117,14 @@ class TellyModel(app: Application) : AndroidViewModel(app) {
         poll()
     }
 
-    fun loadLibrary() = viewModelScope.launch {
+    /** Earlier days, a fortnight at a time; `more` continues from the oldest day shown. */
+    fun loadLibrary(more: Boolean = false) = viewModelScope.launch {
         try {
-            val lib = api.library()
+            val before = if (more) _state.value.library.lastOrNull()?.day else null
+            val lib = api.library(before)
             lib.days.forEach { d -> d.sessions.forEach { s -> _state.update { st -> st.copy(sessions = st.sessions + (s.id to (st.sessions[s.id] ?: s))) } } }
-            _state.update { it.copy(library = lib.days, libraryLoaded = true) }
+            _state.update { it.copy(library = if (more) (it.library + lib.days).distinctBy { d -> d.day } else lib.days,
+                libraryLoaded = true, libraryEnd = lib.days.size < 14) }
         } catch (e: TellyError) {
             _state.update { it.copy(libraryLoaded = it.library.isNotEmpty(), note = Note(e.message ?: "", problem = true)) }
         }
@@ -166,8 +171,9 @@ class TellyModel(app: Application) : AndroidViewModel(app) {
     }
 
     // -- writing ------------------------------------------------------------------------------------------------------
-    /** Say something to the canvas. On a playlist's page it's about that playlist. */
-    fun send(text: String) {
+    /** Say something to the canvas. On a playlist's page it's about that playlist. `onSent` hears whether it went
+     *  through, so the words stay in the box when it didn't. */
+    fun send(text: String, onSent: (Boolean) -> Unit = {}) {
         val t = text.trim()
         if (t.isEmpty() || _state.value.sending) return
         val focus = (_state.value.top as? Screen.Playlist)?.id
@@ -183,8 +189,10 @@ class TellyModel(app: Application) : AndroidViewModel(app) {
                         note = r.reply?.let { Note(it, problem = r.rough) })
                 }
                 focus?.let { refreshSession(it) }
+                onSent(true)
             } catch (e: TellyError) {
                 _state.update { it.copy(sending = false, note = Note(e.message ?: "Something went wrong.", problem = true)) }
+                onSent(false)
             }
             poll()
         }
@@ -207,9 +215,10 @@ class TellyModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun tweak(id: String, name: String) = mutate(id, name) { api.tweak(id, name) }
-    fun swap(id: String, index: Int) = mutate(id, "swap$index") { api.edit(id, "swap", index) }
-    fun remove(id: String, index: Int) = mutate(id, "remove$index") { api.edit(id, "remove", index) }
-    fun pin(id: String, index: Int, on: Boolean) = mutate(id, "pin$index") { api.edit(id, if (on) "pin" else "unpin", index) }
+    fun swap(id: String, index: Int, trackId: String) = mutate(id, "swap$index") { api.edit(id, "swap", index, trackId) }
+    fun remove(id: String, index: Int, trackId: String) = mutate(id, "remove$index") { api.edit(id, "remove", index, trackId) }
+    fun pin(id: String, index: Int, trackId: String, on: Boolean) =
+        mutate(id, "pin$index") { api.edit(id, if (on) "pin" else "unpin", index, trackId) }
     fun undo(id: String) = mutate(id, "undo") { api.undo(id) }
     fun resync(id: String) = mutate(id, "sync") { api.resync(id) }
 
@@ -220,7 +229,7 @@ class TellyModel(app: Application) : AndroidViewModel(app) {
             try {
                 val s = call()
                 _state.update { st ->
-                    st.copy(sessions = st.sessions + (s.id to s), working = null,
+                    st.copy(sessions = st.sessions + (s.id to s), working = null, note = s.note?.let { Note(it) },
                         day = st.day?.let { d -> d.copy(sessions = d.sessions.map { if (it.id == s.id) s else it }) })
                 }
             } catch (e: TellyError) {

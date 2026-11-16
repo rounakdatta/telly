@@ -34,7 +34,8 @@ class Services:
         ck = self.vault.get('ytm_cookies')
         if not ck:
             return None
-        key = ck.get('SAPISID'), ck.get('__Secure-3PSID')
+        # A fresh paste from the admin bumps ytm_rev; the client's own rotations don't, so they never rebuild it.
+        key = self.vault.get('ytm_rev', 0)
         if self._ytm is None or self._ytm_key != key:
             self._ytm = ytm_mod.YTM(ck, on_rotate=lambda c: self.vault.put('ytm_cookies', c))
             self._ytm_key = key
@@ -59,17 +60,25 @@ class Worker(threading.Thread):
         super().__init__(daemon=True, name='worker')
         self.store, self.services, self.canvas, self.poll = store, services, canvas, poll
         self._status_at = 0
+        self.stories = []  # sessions whose playlists are synced and whose story is still to write
 
     def run(self):
+        # A job leaves the queue when its work starts, so a restart mid-sync (every deploy) would strand it: put
+        # back everything still marked as in progress.
+        for sid in self.store.unfinished():
+            self.store.enqueue(sid)
         while True:
             try:
                 if time.time() - self._status_at > STATUS_EVERY:
                     self.check_services()
                 sid = self.store.claim()
-                if not sid:
+                if sid:
+                    self.sync(sid)
+                elif self.stories:
+                    # Stories are slow (Wikipedia, then the model), so they wait until no playlist is waiting to sync.
+                    self._story(self.stories.pop(0))
+                else:
                     time.sleep(self.poll)
-                    continue
-                self.sync(sid)
             except Exception:
                 log.error('worker: %s', traceback.format_exc()[-600:])
                 time.sleep(2)
@@ -118,7 +127,14 @@ class Worker(threading.Thread):
             self._spotify(sp, s, v)
         else:
             self.store.update_session(sid, sp_state='off')
-        self._story(sid)
+        latest = self.store.session(sid)
+        if latest and latest['version'] != v['n']:
+            # Changed while syncing: what was just written is already stale, so say so and sync again first.
+            self.store.update_session(sid, **{k: 'pending' for k in ('ytm_state', 'sp_state') if latest.get(k) == 'synced'})
+            self.store.enqueue(sid)
+            return
+        if sid not in self.stories:
+            self.stories.append(sid)
 
     def _remote_title(self, s):
         return f"{s['title'][:1].upper()}{s['title'][1:]} · {time.strftime('%-d %b', time.strptime(s['day'], '%Y-%m-%d'))}"
@@ -155,19 +171,18 @@ class Worker(threading.Thread):
                     vids.append((t['id'], vid))
             want = list(dict.fromkeys(vid for _, vid in vids))
             title, desc = self._remote_title(s), self._description(s, v)
-            if s.get('ytm_id'):
-                try:
-                    rows = y.replace(s['ytm_id'], want, current_count=s.get('ytm_count'))
-                    y.set_meta(s['ytm_id'], title=title, description=desc)
-                    pid = s['ytm_id']
-                except ytm_mod.AuthError:
-                    raise
-                except Exception:
-                    log.warning('YouTube Music playlist %s unusable, making a new one', s['ytm_id'])
-                    pid = y.create(title, desc, want)
-                    rows = y.settled_items(pid, len(want))
+            pid = s.get('ytm_id')
+            if pid and not y.exists(pid):
+                log.warning('YouTube Music playlist %s is gone; making a new one', pid)
+                pid = None
+            if pid:
+                # A passing failure here is reported and retried, never answered with a second playlist.
+                rows = y.replace(pid, want, current_count=s.get('ytm_count'))
+                y.set_meta(pid, title=title, description=desc)
             else:
                 pid = y.create(title, desc, want)
+                # Remember it before anything else can fail, or the next sync would make another.
+                self.store.update_session(sid, ytm_id=pid, ytm_count=len(want))
                 rows = y.settled_items(pid, len(want))
             # YouTube Music swaps a music video for its song version on the way in, so rows match by position when
             # the counts agree, and by id otherwise; the id it kept is remembered, or every sync would see a change.
@@ -226,9 +241,16 @@ class Worker(threading.Thread):
 
     def _story(self, sid):
         s = self.store.session(sid)
+        if not s or s['deleted']:
+            return
         v = self.store.version(sid)
         ids = {t['id'] for t in v['tracks']}
         lens = self.store.lens(s['day'])
+        tried = f"{lens or ''}|{'|'.join(sorted(ids))}"
+        if not s.get('story') and self.store.get(f'story_none:{sid}') == tried:
+            if s.get('story_state') != 'none':
+                self.store.update_session(sid, story_state='none')
+            return  # nothing to write about these songs (for this lens) last time either
         if s.get('story'):
             st = json.loads(s['story'])
             # keep it while its song is still there and it was written for today's lens
@@ -260,6 +282,7 @@ class Worker(threading.Thread):
             log.warning('story %s: %s', sid, str(e)[:200])
             st = None
         if not st:
+            self.store.put(f'story_none:{sid}', tried)
             self.store.update_session(sid, story_state='none')
             return
         st['lens'] = lens
@@ -274,25 +297,34 @@ class Worker(threading.Thread):
 
     def _delete_remote(self, s):
         y, sp = self.services.ytm(), self.services.spotify()
+        retry = False
         if s.get('ytm_id') and y:
             try:
                 y.delete(s['ytm_id'])
                 self.store.update_session(s['id'], ytm_id=None, ytm_state='deleted')
             except Exception as e:
+                retry = True
                 log.warning('ytm delete %s: %s', s['id'], str(e)[:160])
         if s.get('sp_id') and sp:
             try:
                 sp.delete(s['sp_id'])
                 self.store.update_session(s['id'], sp_id=None, sp_state='deleted')
             except Exception as e:
+                retry = True
                 log.warning('spotify delete %s: %s', s['id'], str(e)[:160])
+        if retry:
+            self.store.enqueue(s['id'], delay=300)
 
 
 def migrate_secrets(store, vault):
-    """Earlier builds kept the sign-ins in telly.db, which the API can read. Move them into the Vault, once."""
+    """Earlier builds kept the sign-ins in telly.db, which the API can read. Move them into the Vault, once, and
+    scrub them from the database file and its journal (a plain DELETE leaves the bytes in free pages)."""
+    moved = []
     for key in ('ytm_cookies', 'spotify'):
         v = store.get(key)
         if v and not vault.get(key):
             vault.put(key, v)
         if v:
-            store.put(key, None)
+            moved.append(key)
+    if moved:
+        store.scrub(moved)

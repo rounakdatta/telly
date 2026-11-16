@@ -92,7 +92,7 @@ class ScreenshotTest {
     fun playlist_saving() = shoot("4-playlist-saving") {
         val haze = HazeState()
         Box(Modifier.fillMaxSize()) {
-            PlaylistScreen(walk.copy(ytm = Remote("syncing"), story = Story("writing"), version = 1), "calmer", haze, noop, 96.dp)
+            PlaylistScreen(walk.copy(ytm = Remote("syncing"), story = Story("writing"), version = 1, canUndo = false), "calmer", haze, noop, 96.dp)
             Composer("swap the third song", {}, "Change this playlist…", true, {}, {}, haze, null, {}, Modifier.align(Alignment.BottomCenter))
         }
     }
@@ -111,8 +111,8 @@ class ScreenshotTest {
     @Test
     fun settings() = shoot("7-settings") {
         SettingsScreen(false, "https://telly.taptappers.club", "secret-token-value", Status(
-            catalog = CatalogInfo(36044, 5808, 1794830037), llm = true, today = "2026-11-16", place = "Bengaluru",
-            ytm = Service(true, "Rounak Datta"), spotify = Service(false, error = "not connected")), false, null, { _, _ -> }, {})
+            catalog = CatalogInfo(30000, 5000, 1794830037), llm = true, today = "2026-11-16", place = "Bengaluru",
+            ytm = Service(true, "you"), spotify = Service(false, error = "not connected")), false, null, { _, _ -> }, {})
     }
 
     companion object {
@@ -136,7 +136,7 @@ class ScreenshotTest {
                 tr(7, "Tomake Male", "Rupam Islam", "forgotten"), tr(8, "Dil Ibaadat", "Pritam", "new_known"),
                 tr(9, "Wolves", "Selena Gomez", "comfort"), tr(10, "Zack And Codeine", "Post Malone", "comfort"),
             ),
-            version = 4, ytm = Remote("synced", "https://music.youtube.com/playlist?list=PLx"), spotify = Remote("off"),
+            version = 4, canUndo = true, ytm = Remote("synced", "https://music.youtube.com/playlist?list=PLx"), spotify = Remote("off"),
             story = Story("ready", "Roses (Imanbek Remix) — SAINt JHN",
                 "Four years before it soundtracked your run, \"Roses\" was a modest 2016 track by the Guyanese-American rapper SAINt JHN.\n\nThen a nineteen-year-old Kazakh producer named Imanbek, working from Aqtobe, pitched the vocals up and rebuilt the beat.",
                 "Song Machine — John Seabrook (book)", true),

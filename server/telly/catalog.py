@@ -43,16 +43,20 @@ class Catalog:
         self.artist_aff = {k: math.log1p(v) for k, v in plays.items()}
         self.artist_name = {k: c.most_common(1)[0][0] for k, c in names.items()}
         self.size = len(self.tracks)
+        # Songs by normalised title, built once: matching a name against 42k titles on every request took ~1.3 s.
+        self.by_title = defaultdict(list)
+        for t in self.by_id.values():
+            self.by_title[ntrack(t['title'])].append(t)
 
     def find(self, title, artist=None):
         """A song asked for by name: the catalogue entry that is surely it, or None."""
         tk, ak = ntrack(title), nartist(artist or '')
         if not tk:
             return None
-        exact = [t for t in self.by_id.values() if ntrack(t['title']) == tk and (not ak or nartist(t['artist']) == ak or ak in nartist(t['artist']))]
+        same = self.by_title.get(tk, [])
+        exact = [t for t in same if not ak or nartist(t['artist']) == ak or ak in nartist(t['artist'])]
         if not exact and ak:
-            exact = [t for t in self.by_id.values() if ntrack(t['title']) == tk]
-            exact = [t for t in exact if ak.split(' ')[0] in nartist(t['artist'])] or (exact if len(exact) == 1 else [])
+            exact = [t for t in same if ak.split(' ')[0] in nartist(t['artist'])] or (same if len(same) == 1 else [])
         if not exact:
             return None
         return max(exact, key=lambda t: (t.get('plays') or 0, t.get('playcount') or 0))

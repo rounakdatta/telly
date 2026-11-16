@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS versions (
   reply TEXT,                -- what telly did, in a line
   brief TEXT NOT NULL,
   tracks TEXT NOT NULL,
+  parent INTEGER,            -- the version this one was made from (0 = none); undo goes back along it
   PRIMARY KEY (session_id, n)
 );
 CREATE TABLE IF NOT EXISTS resolved (
@@ -52,6 +53,9 @@ class Store:
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
         with self.db() as c:
             c.executescript(SCHEMA)
+            cols = {r['name'] for r in c.execute('PRAGMA table_info(versions)')}
+            if 'parent' not in cols:  # databases made before undo walked back
+                c.execute('ALTER TABLE versions ADD COLUMN parent INTEGER')
 
     def db(self):
         c = getattr(self.local, 'c', None)
@@ -109,12 +113,14 @@ class Store:
             c.execute(f'UPDATE sessions SET {cols} WHERE id=?', (*fields.values(), sid))
 
     # -- versions ------------------------------------------------------------------------------------------------
-    def add_version(self, sid, source, said, reply, brief, tracks):
+    def add_version(self, sid, source, said, reply, brief, tracks, parent=None):
+        """parent: the version this is made from; None means the current one (an ordinary change)."""
         with self.db() as c:
             c.execute('BEGIN IMMEDIATE')
-            n = (c.execute('SELECT COALESCE(MAX(n), 0) FROM versions WHERE session_id=?', (sid,)).fetchone()[0]) + 1
-            c.execute('INSERT INTO versions VALUES(?,?,?,?,?,?,?,?)',
-                      (sid, n, time.time(), source, said, reply, json.dumps(brief), json.dumps(tracks)))
+            cur = c.execute('SELECT COALESCE(MAX(n), 0) FROM versions WHERE session_id=?', (sid,)).fetchone()[0]
+            n = cur + 1
+            c.execute('INSERT INTO versions(session_id, n, created, source, said, reply, brief, tracks, parent) VALUES(?,?,?,?,?,?,?,?,?)',
+                      (sid, n, time.time(), source, said, reply, json.dumps(brief), json.dumps(tracks), cur if parent is None else parent))
             c.execute('UPDATE sessions SET version=?, updated=? WHERE id=?', (n, time.time(), sid))
             c.execute('COMMIT')
         return n
@@ -157,20 +163,38 @@ class Store:
                       f"ON CONFLICT(id) DO UPDATE SET {', '.join(f'{k}=excluded.{k}' for k in fields)}", (tid, *fields.values()))
 
     # -- the queue between the API and the worker --------------------------------------------------------------------
-    def enqueue(self, sid):
+    def enqueue(self, sid, delay=0):
         with self.db() as c:
             c.execute('INSERT INTO jobs(session_id, queued) VALUES(?, ?) ON CONFLICT(session_id) DO UPDATE SET queued=excluded.queued',
-                      (sid, time.time()))
+                      (sid, time.time() + delay))
 
     def claim(self):
-        """Take the oldest waiting session, or None. A request that arrives while it syncs queues it again."""
+        """Take the oldest session that is due, or None. A request that arrives while it syncs queues it again."""
         with self.db() as c:
             c.execute('BEGIN IMMEDIATE')
-            r = c.execute('SELECT session_id FROM jobs ORDER BY queued LIMIT 1').fetchone()
+            r = c.execute('SELECT session_id FROM jobs WHERE queued <= ? ORDER BY queued LIMIT 1', (time.time(),)).fetchone()
             if r:
                 c.execute('DELETE FROM jobs WHERE session_id=?', (r['session_id'],))
             c.execute('COMMIT')
         return r['session_id'] if r else None
+
+    def unfinished(self):
+        """Sessions a restart may have interrupted mid-sync (the job is taken off the queue when work starts)."""
+        with self.db() as c:
+            rows = c.execute("SELECT id FROM sessions WHERE version > 0 AND (ytm_state IN ('pending','syncing') OR "
+                             "sp_state IN ('pending','syncing') OR story_state IN ('pending','writing') OR "
+                             "(deleted=1 AND (ytm_id IS NOT NULL OR sp_id IS NOT NULL)))").fetchall()
+        return [r['id'] for r in rows]
+
+    def scrub(self, keys):
+        """Delete settings so their bytes are gone from the file and its journal too, not just unlinked."""
+        with self.db() as c:
+            c.execute('PRAGMA secure_delete=ON')
+            for k in keys:
+                c.execute('DELETE FROM kv WHERE k=?', (k,))
+            c.execute('PRAGMA wal_checkpoint(TRUNCATE)')
+            c.execute('VACUUM')
+            c.execute('PRAGMA wal_checkpoint(TRUNCATE)')
 
     # -- the day's lens: what he wants to learn about today -----------------------------------------------------------
     def lens(self, day):

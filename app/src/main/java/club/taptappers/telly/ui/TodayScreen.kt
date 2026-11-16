@@ -141,6 +141,6 @@ fun SessionCard(s: Session, onOpen: () -> Unit, onPlay: (String) -> Unit, modifi
             Text(s.summary, style = T.caption, color = C.text3, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 4.dp))
         }
         Spacer(Modifier.width(10.dp))
-        PlayCircle(s.ytm.url, settling = s.ytm.state in setOf("pending", "syncing"), onPlay = onPlay)
+        PlayCircle(s.ytm.play ?: s.ytm.url, settling = s.ytm.state in setOf("pending", "syncing"), onPlay = onPlay)
     }
 }

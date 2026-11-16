@@ -85,7 +85,8 @@ fun Composer(
     val view = LocalView.current
     val send = {
         if (text.isNotBlank() && !sending) {
-            view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
+            // CONFIRM exists from Android 11; on 10 a key tap is the nearest feel.
+            view.performHapticFeedback(if (android.os.Build.VERSION.SDK_INT >= 30) HapticFeedbackConstants.CONFIRM else HapticFeedbackConstants.KEYBOARD_TAP)
             onSend()
         }
     }

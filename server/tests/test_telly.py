@@ -144,6 +144,25 @@ class EngineTest(Base):
         self.assertNotEqual(order[1]['id'], swapped[1]['id'])
         self.assertIn(order[1]['id'], b3['avoid'])
 
+    def test_several_pins_all_keep_their_places(self):
+        b, order = self.build(activity='walk', minutes=50)
+        for i in (1, 4, 6):
+            order[i]['pinned'] = True
+        for seed in range(12):
+            b2 = E.tweak(dict(b, seed=seed), 'calmer')
+            order2, _ = E.rebuild(self.cat, b2, 18, order, {}, now=NOW)
+            self.assertEqual([order[i]['id'] for i in (1, 4, 6)], [order2[i]['id'] for i in (1, 4, 6)])
+
+    def test_a_failed_swap_keeps_the_song_and_does_not_ban_it(self):
+        b, order = self.build(activity='walk', minutes=30)
+        bl = E.Builder(self.cat, b, 18, now=NOW, prev=order)
+        bl.replacement = lambda *a, **k: None  # nothing else fits
+        notes = []
+        out, b2 = E.apply_ops(self.cat, b, order, [{'op': 'swap', 'index': 2}], bl, notes)
+        self.assertEqual(order[2]['id'], out[2]['id'])
+        self.assertNotIn(order[2]['id'], b2['avoid'])
+        self.assertTrue(notes and 'stays' in notes[0])
+
     def test_pinned_songs_survive_a_rebuild_in_place(self):
         b, order = self.build(activity='walk', minutes=45)
         order[3]['pinned'] = True
@@ -198,7 +217,7 @@ class ApiTest(Base):
         cls.canvas = Canvas(cls.store, cats, Place(), LLM('http://127.0.0.1:9', 'k', 'm'))
         cls.canvas.place.forecast = lambda: None  # no network in tests
         cls.token = 'x' * 40
-        cls.limits = Limits(fails=5, window=600, budgets={'prompt': 6, 'change': 600})
+        cls.limits = Limits(fails=5, window=600, budgets={'prompt': 50, 'change': 600})
         app = PublicApp(cls.token, cls.canvas, cls.store, cats, limits=cls.limits)
         cls.PORT = start(app)
 
@@ -277,6 +296,48 @@ class ApiTest(Base):
         self.assertEqual('20th-century history', self.req('GET', '/api/day/today')[1]['lens'])
         self.assertIsNone(self.req('POST', '/api/day/today/lens', {'text': ''})[1]['lens'])
 
+    def test_undo_walks_back_rather_than_toggling(self):
+        _, r = self.req('POST', '/api/day/today/prompt', {'text': 'a walk at 8 pm, 40 minutes'})
+        sid = r['focus']
+        v1 = [t['id'] for t in self.req('GET', f'/api/session/{sid}')[1]['tracks']]
+        v2 = [t['id'] for t in self.req('POST', f'/api/session/{sid}/tweak', {'tweak': 'shorter'})[1]['tracks']]
+        self.req('POST', f'/api/session/{sid}/tweak', {'tweak': 'reshuffle'})
+        back1 = self.req('POST', f'/api/session/{sid}/undo')[1]
+        back2 = self.req('POST', f'/api/session/{sid}/undo')[1]
+        self.assertEqual(v2, [t['id'] for t in back1['tracks']])
+        self.assertEqual(v1, [t['id'] for t in back2['tracks']], 'a second undo goes back again (it used to redo)')
+        self.assertFalse(back2['can_undo'])
+        self.assertEqual(back2['version'], self.req('POST', f'/api/session/{sid}/undo')[1]['version'], 'nothing left to undo')
+
+    def test_a_new_activity_brings_its_own_energy(self):
+        _, r = self.req('POST', '/api/day/today/prompt', {'text': 'a walk at 9 pm'})
+        sid = r['focus']
+        day = self.canvas.place.today()
+        self.canvas._apply(day, {'target': sid, 'activity': 'run', 'reply': 'Made it a run.'}, 'make it a run', {sid})
+        b = self.store.version(sid)['brief']
+        self.assertEqual(E.ACTIVITIES['run']['energy'], tuple(b['energy']))
+        self.assertEqual('07:00', self.canvas._apply(day, {'target': 'new', 'activity': 'run', 'start': '7:00', 'reply': ''}, 'x', set())
+                         and self.store.version(max(self.store.sessions_on(day), key=lambda s: s['created'])['id'])['brief']['start'])
+
+    def test_answers_sent_before_the_body_close_the_connection(self):
+        import socket
+        sock = socket.create_connection(('127.0.0.1', self.PORT), timeout=10)
+        smuggled = b'GET /livez HTTP/1.1\r\nHost: x\r\n\r\n'
+        sock.sendall(b'POST /api/day/today/prompt HTTP/1.1\r\nHost: x\r\nContent-Length: %d\r\n\r\n' % len(smuggled) + smuggled)
+        got = b''
+        while True:
+            chunk = sock.recv(65536)
+            if not chunk:
+                break
+            got += chunk
+        sock.close()
+        self.assertIn(b' 401 ', got.split(b'\r\n')[0])
+        self.assertEqual(1, got.count(b'HTTP/1.1 '), 'the bytes after an unread body must never be answered as a request')
+
+    def test_dates_that_are_not_dates_change_nothing(self):
+        self.assertEqual(400, self.req('POST', '/api/day/2026-13-45/lens', {'text': 'x'})[0])
+        self.assertIsNone(self.store.lens('2026-13-45'))
+
     def test_edits_are_validated(self):
         _, r = self.req('POST', '/api/day/today/prompt', {'text': 'a drive at 7 am'})
         self.assertEqual(400, self.req('POST', f"/api/session/{r['focus']}/edit", {'op': 'remove', 'index': 999})[0])
@@ -311,6 +372,19 @@ class AdminTest(Base):
             self.assertEqual(want, code)
         with self.assertRaises(SystemExit):
             AdminApp('short', FakeWorker(), vault, Catalogs(self.path))
+
+    def test_a_restart_puts_interrupted_work_back(self):
+        store = Store(os.path.join(self.tmp.name, 'restart.db'))
+        sid = store.new_session('2026-11-16', 'walk')
+        store.add_version(sid, 'prompt', 'x', 'y', {'activity': 'walk'}, [])
+        store.update_session(sid, ytm_state='syncing')
+        self.assertIn(sid, store.unfinished())
+
+    def test_rotation_never_adds_cookies(self):
+        from telly.ytm import YTM
+        y = YTM({'SAPISID': 'a', '__Secure-1PSIDTS': 'old'})
+        y._absorb(['__Secure-1PSIDTS=new; Domain=.youtube.com; Path=/; Secure; HttpOnly; Priority=HIGH', 'NEWONE=x; Path=/'])
+        self.assertEqual({'SAPISID': 'a', '__Secure-1PSIDTS': 'new'}, y.cookies)
 
     def test_the_queue_syncs_a_session_once_however_often_it_changed(self):
         store = Store(os.path.join(self.tmp.name, 'queue.db'))

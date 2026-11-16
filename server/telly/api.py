@@ -43,6 +43,10 @@ HEADERS = {
 }
 
 
+class BadRequest(Exception):
+    pass
+
+
 class Catalogs:
     """The current catalogue, swappable while serving. The API process notices a new file by its mtime (the worker
     writes it), so an upload needs no restart."""
@@ -136,6 +140,7 @@ class Base:
     max_body = API_BODY
 
     def __init__(self, token, name):
+        token = (token or '').strip()
         if not token or len(token) < 32:
             raise SystemExit(f'{name} must be set (32+ characters): a missing token never means an open server')
         self.token = token.encode()
@@ -172,7 +177,14 @@ class PublicApp(Base):
         ]
 
     def _day(self, d):
-        return self.canvas.place.today() if d == 'today' else d
+        if d == 'today':
+            return self.canvas.place.today()
+        import datetime as _dt
+        try:
+            _dt.date.fromisoformat(d)
+        except ValueError:
+            raise BadRequest('not a date') from None
+        return d
 
     def livez(self, m, q, body):
         return 200, {'ok': True}
@@ -227,9 +239,12 @@ class PublicApp(Base):
         s = self.canvas.session(m.group(1))
         if not s:
             return 404, {'error': 'no such playlist'}
-        if not 0 <= index < s['count']:
+        track_id = body.get('id')
+        if track_id is not None and (not isinstance(track_id, str) or len(track_id) > 300):
+            return 400, {'error': 'id must be a song id'}
+        if not 0 <= index < s['count'] and track_id is None:
             return 400, {'error': 'index out of range'}
-        return 200, self.canvas.edit(m.group(1), op, index, to)
+        return 200, self.canvas.edit(m.group(1), op, index, to, track_id)
 
     def undo(self, m, q, body):
         if not self.canvas.session(m.group(1)):
@@ -302,6 +317,7 @@ class AdminApp(Base):
         except Exception as e:
             return 400, {'error': f'those cookies are not signed in: {str(e)[:120]}'}
         self.vault.put('ytm_cookies', ck)
+        self.vault.put('ytm_rev', time.time())  # the worker rebuilds its client from this paste, not its old jar
         self.worker.check_services()
         return 200, {'ok': True, 'account': who}
 
@@ -343,7 +359,8 @@ class BoundedServer(ThreadingHTTPServer):
 def client_ip(handler):
     """The caller's address. Only Traefik and agentfest can reach these pods (NetworkPolicy), and Traefik sets
     X-Real-Ip from the connection it accepted, so it can be believed here."""
-    return (handler.headers.get('X-Real-Ip') or handler.client_address[0] or '?').strip()[:64]
+    ip = (handler.headers.get('X-Real-Ip') or handler.client_address[0] or '?').strip()[:64]
+    return ip if re.fullmatch(r'[0-9A-Fa-f:.]+', ip) else '?'
 
 
 def make_handler(app):
@@ -362,13 +379,17 @@ def make_handler(app):
         def version_string(self):
             return 'telly'  # no Python version on the wire
 
-        def _send(self, code, payload, extra=None):
+        def _send(self, code, payload, extra=None, close=False):
             data = json.dumps(payload, ensure_ascii=False).encode()
+            if close:
+                self.close_connection = True
             self.send_response(code)
             for k, v in HEADERS.items():
                 self.send_header(k, v)
             for k, v in (extra or {}).items():
                 self.send_header(k, v)
+            if close:
+                self.send_header('Connection', 'close')
             self.send_header('Content-Length', str(len(data)))
             self.end_headers()
             self.wfile.write(data)
@@ -380,7 +401,7 @@ def make_handler(app):
             try:
                 if len(self.path) > 2048:
                     code = 414
-                    return self._send(414, {'error': 'too long'})
+                    return self._send(414, {'error': 'too long'}, close=True)
                 for meth, rx, fn, auth, kind in routes:
                     m = rx.match(url.path)
                     if not m:
@@ -394,26 +415,26 @@ def make_handler(app):
                                 limits.note_bad(ip)
                                 if limits.locked(ip):
                                     code = 429
-                                    return self._send(429, {'error': 'too many bad tokens; wait a few minutes'}, {'Retry-After': '600'})
+                                    return self._send(429, {'error': 'too many bad tokens; wait a few minutes'}, {'Retry-After': '600'}, close=True)
                             code = 401
                             log.warning('bad token from %s for %s', ip, url.path)
-                            return self._send(401, {'error': 'unauthorised'}, {'WWW-Authenticate': 'Bearer'})
+                            return self._send(401, {'error': 'unauthorised'}, {'WWW-Authenticate': 'Bearer'}, close=True)
                         if limits and kind and not limits.spend(kind):
                             code = 429
                             return self._send(429, {'error': 'That is a lot of changes for one hour. Give it a little while.'},
-                                              {'Retry-After': '300'})
+                                              {'Retry-After': '300'}, close=True)
                     n = self.headers.get('Content-Length')
                     try:
                         n = int(n or 0)
                     except ValueError:
                         code = 400
-                        return self._send(400, {'error': 'bad length'})
+                        return self._send(400, {'error': 'bad length'}, close=True)
                     if n < 0 or n > app.max_body:
                         code = 413
-                        return self._send(413, {'error': 'too large'})
+                        return self._send(413, {'error': 'too large'}, close=True)
                     if self.headers.get('Transfer-Encoding'):
                         code = 411
-                        return self._send(411, {'error': 'send a Content-Length'})
+                        return self._send(411, {'error': 'send a Content-Length'}, close=True)
                     raw = self.rfile.read(n) if n else b''
                     if url.path == '/admin/catalog':
                         body = raw
@@ -430,9 +451,11 @@ def make_handler(app):
                         code, payload = fn(m, urllib.parse.parse_qs(url.query, max_num_fields=10), body)
                     except NoCatalog as e:
                         code, payload = 503, {'error': str(e)}
+                    except BadRequest as e:
+                        code, payload = 400, {'error': str(e)}
                     return self._send(code, payload)
                 code = 404
-                self._send(404, {'error': 'not found'})
+                self._send(404, {'error': 'not found'}, close=True)
             except (BrokenPipeError, ConnectionResetError, TimeoutError):
                 pass
             except Exception:

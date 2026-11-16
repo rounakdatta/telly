@@ -52,11 +52,14 @@ Without the gateway, telly still answers: simple rules read the common requests,
 
 ```bash
 cd server
-TELLY_TOKEN=$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))') \
-TELLY_LLM_URL=https://your-gateway TELLY_LLM_KEY=... \
-python3 -m telly --data ./data --port 8080
+export TELLY_LLM_URL=https://your-gateway TELLY_LLM_KEY=...
+TELLY_TOKEN=$(python3 -c 'import secrets; print(secrets.token_hex(32))') python3 -m telly serve --data ./data --port 8080 &
+TELLY_ADMIN_TOKEN=$(python3 -c 'import secrets; print(secrets.token_hex(32))') python3 -m telly worker --data ./data --vault ./vault/vault.json --port 8081 &
 python3 -m unittest discover -s tests -v
 ```
+
+`serve` is the public API and holds no music-service sign-ins. `worker` does the syncing and the stories, and serves
+the admin routes (catalogue upload, sign-ins) with its own token; only it can read the vault.
 
 The app asks for the server's address and token on first open. Every API route except `/livez` needs
 `Authorization: Bearer <TELLY_TOKEN>`.
@@ -66,9 +69,8 @@ The app asks for the server's address and token on first open. Every API route e
 There is no local Android build: CI does it.
 
 - **Android** (`.github/workflows/android.yml`):
-  - On every PR it builds the APK and photographs every screen with Roborazzi. Both are uploaded as artifacts.
-  - On `main` it publishes the APK as a release. The APK is debug-signed with the checked-in key, so each build
-    installs over the last.
+  - On every PR it builds a debug APK and photographs every screen with Roborazzi. Both are uploaded as artifacts.
+  - On `main` it builds a release APK signed with telly's own key (encrypted repository secrets) and publishes it.
 - **Server** (`.github/workflows/server.yml`):
   - Tests run on every change.
   - Branch pushes publish `ghcr.io/rounakdatta/telly-server:sha-<commit>`.
