@@ -139,6 +139,8 @@ data class Status(
     val place: String = "",
     val ytm: Service = Service(),
     val spotify: Service = Service(),
+    /** The server can show lyrics for what's playing (it knows where LeZeppLean is). */
+    val lyrics: Boolean = false,
 )
 
 @Serializable

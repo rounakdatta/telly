@@ -1,8 +1,10 @@
 package club.taptappers.telly.ui
 
 import android.content.ActivityNotFoundException
+import android.content.ComponentName
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
 import android.speech.RecognizerIntent
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -15,6 +17,8 @@ import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
@@ -31,9 +35,15 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.foundation.layout.Column
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import club.taptappers.telly.data.NowPlayingListener
+import club.taptappers.telly.data.Playing
+import club.taptappers.telly.data.locate
 import dev.chrisbanes.haze.HazeState
 import kotlinx.coroutines.delay
 import java.util.Calendar
@@ -76,6 +86,26 @@ fun App(model: TellyModel) {
         model.dismissExchange(ex.id)
     }
 
+    // Letting telly see the music player is Android's notification access, granted in Android's own settings: the
+    // page for telly's switch where there is one (Android 11+), else the list.
+    val allowPlayer: () -> Unit = {
+        model.askingForAccess()
+        val listener = ComponentName(context, NowPlayingListener::class.java).flattenToString()
+        val opened = Build.VERSION.SDK_INT >= 30 && runCatching {
+            context.startActivity(Intent(android.provider.Settings.ACTION_NOTIFICATION_LISTENER_DETAIL_SETTINGS)
+                .putExtra(android.provider.Settings.EXTRA_NOTIFICATION_LISTENER_COMPONENT_NAME, listener).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        }.isSuccess
+        if (!opened) runCatching {
+            context.startActivity(Intent(android.provider.Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        }
+    }
+    val appInfo: () -> Unit = {
+        runCatching {
+            context.startActivity(Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", context.packageName, null))
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        }
+    }
+
     if (!st.configured) {
         SettingsScreen(true, model.server, model.token, st.status, st.statusLoading, st.statusError, model::connect, null)
         return
@@ -83,14 +113,33 @@ fun App(model: TellyModel) {
 
     BackHandler(enabled = st.stack.size > 1) { model.back() }
     val haze = remember { HazeState() }
-    val composerSpace = 96.dp
+    // The song playing, placed in one of telly's playlists: the one open (or open beneath the words) first, then today's.
+    val openPlaylist = (st.stack.lastOrNull { it is Screen.Playlist } as? Screen.Playlist)?.id
+    val spot = remember(st.playing?.key, st.sessions, st.day, openPlaylist) {
+        val today = st.day?.sessions.orEmpty().sortedByDescending { it.created }
+        locate(st.playing, (listOfNotNull(openPlaylist?.let { st.sessions[it] }) + today + st.sessions.values).distinctBy { it.id })
+    }
+    val miniShown = st.playing != null && ex == null
+    val inviteShown = st.playing == null && ex == null && st.offerLyrics && st.top == Screen.Today
+    // Room under the lists for the composer and what sits on it (the player, or the invitation), measured rather than
+    // guessed: the invitation is taller on a narrow phone, and taller again when it explains a restricted setting.
+    val density = LocalDensity.current
+    var onComposer by remember { mutableStateOf(0.dp) }
+    val composerSpace = 96.dp + onComposer
 
     Box(Modifier.fillMaxSize()) {
         AnimatedContent(
             targetState = st.top,
             transitionSpec = {
-                val forward = targetState !is Screen.Today
-                (slideInHorizontally { if (forward) it / 6 else -it / 6 } + fadeIn()) togetherWith (slideOutHorizontally { if (forward) -it / 8 else it / 8 } + fadeOut())
+                when {
+                    // The words rise from the player below, and settle back into it.
+                    targetState == Screen.Lyrics -> (slideInVertically(tween(320)) { it / 4 } + fadeIn(tween(240))) togetherWith fadeOut(tween(200))
+                    initialState == Screen.Lyrics -> fadeIn(tween(240)) togetherWith (slideOutVertically(tween(280)) { it / 4 } + fadeOut(tween(220)))
+                    else -> {
+                        val forward = targetState !is Screen.Today
+                        (slideInHorizontally { if (forward) it / 6 else -it / 6 } + fadeIn()) togetherWith (slideOutHorizontally { if (forward) -it / 8 else it / 8 } + fadeOut())
+                    }
+                }
             },
             label = "screens",
         ) { screen ->
@@ -109,6 +158,7 @@ fun App(model: TellyModel) {
                     if (s != null) {
                         // While a message is being read the chips rest too: a tap would be dropped, so it shouldn't look tappable.
                         PlaylistScreen(s, st.working ?: "message".takeIf { st.sending }, updating = st.updating == s.id, fresh = st.fresh[s.id].orEmpty(), haze = haze,
+                            playing = spot?.takeIf { it.session.id == s.id }?.let { it.index to (st.playing?.let { p -> p.playing || p.buffering } == true) },
                             actions = PlaylistActions(
                                 onBack = model::back, onOpenUrl = openUrl,
                                 onTweak = { key, label -> model.tweak(s.id, key, label) }, onUndo = { model.undo(s.id) },
@@ -125,7 +175,14 @@ fun App(model: TellyModel) {
                     onOpen = { model.open(Screen.Playlist(it.id)) }, onSettings = { model.open(Screen.Settings) },
                     onMore = if (st.libraryEnd) null else ({ model.loadLibrary(more = true) }))
                 Screen.Settings -> SettingsScreen(false, model.server, model.token, st.status, st.statusLoading, st.statusError,
-                    model::connect, onBack = model::back)
+                    model::connect, onBack = model::back, canSeePlayer = st.canSeePlayer, onAllowPlayer = allowPlayer)
+                Screen.Lyrics -> LyricsScreen(
+                    playing = st.playing, lyrics = st.lyrics, error = st.lyricsError, spot = spot,
+                    onClose = model::back, onSeek = model::seekTo, onPlayPause = model::playPause, onNext = model::next,
+                    onPrevious = model::previous, onRetry = model::retryLyrics, onOpenUrl = openUrl,
+                    suggestion = st.day?.sessions?.filter { (it.ytm.play ?: it.ytm.url) != null }?.maxByOrNull { it.created }
+                        ?.let { it.name to (it.ytm.play ?: it.ytm.url).orEmpty() },
+                )
             }
         }
 
@@ -153,6 +210,22 @@ fun App(model: TellyModel) {
                             ExchangeCard(e, e.target?.let { st.sessions[it] }, haze,
                                 onOpen = if (top == Screen.Today) ({ id: String -> model.dismissExchange(); model.open(Screen.Playlist(id)) }) else null,
                                 onDismiss = { model.dismissExchange(e.id) }, modifier = Modifier.padding(bottom = 10.dp))
+                        }
+                    }
+                    Column(Modifier.onSizeChanged { onComposer = with(density) { it.height.toDp() } }) {
+                        // What's playing, while nothing is being said (the exchange has the floor while it lasts).
+                        AnimatedVisibility(visible = miniShown, enter = fadeIn(tween(220)) + expandVertically(tween(260)),
+                            exit = fadeOut(tween(180)) + shrinkVertically(tween(220))) {
+                            val lastPlaying = remember { arrayOfNulls<Playing>(1) }
+                            st.playing?.let { lastPlaying[0] = it }
+                            (st.playing ?: lastPlaying[0])?.let { p ->
+                                MiniPlayer(p, st.lyrics, onOpen = { model.open(Screen.Lyrics) }, onPlayPause = model::playPause, haze = haze,
+                                    modifier = Modifier.padding(bottom = 10.dp))
+                            }
+                        }
+                        AnimatedVisibility(visible = inviteShown, enter = fadeIn(tween(220)), exit = fadeOut(tween(180)) + shrinkVertically(tween(220))) {
+                            LyricsInvite(st.lyricsStuck, onAllow = allowPlayer, onAppInfo = appInfo, onDecline = model::declineLyrics, haze = haze,
+                                modifier = Modifier.padding(bottom = 10.dp))
                         }
                     }
                 },

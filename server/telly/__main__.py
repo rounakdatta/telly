@@ -11,6 +11,9 @@ Environment:
   TELLY_LLM_URL      Anthropic-shaped gateway (default: auth2api in-cluster)
   TELLY_LLM_KEY      its key (without one telly still works: rules read messages, no stories)
   TELLY_LLM_MODEL    default claude-sonnet-5
+  TELLY_LYRICS_URL   serve: LeZeppLean, for what's playing and its word-timed lyrics (unset: no lyrics)
+  TELLY_LYRICS_TOKEN serve: its bearer token
+  TELLY_GENIUS_TOKEN serve: a Genius API client token (optional: without one, Genius's public JSON is read)
 """
 import argparse
 import logging
@@ -21,7 +24,9 @@ import sys
 from .api import AdminApp, Catalogs, PublicApp, serve
 from .canvas import Canvas
 from .context import Place
+from .genius import Genius
 from .llm import LLM
+from .lyrics import Lyrics
 from .store import Store
 from .sync import Services, Worker, migrate_secrets
 from .vault import Vault
@@ -48,7 +53,9 @@ def main():
               os.environ.get('TELLY_LLM_MODEL', 'claude-sonnet-5'))
     canvas = Canvas(store, catalogs, place, llm)
     if a.role == 'serve':
-        serve(PublicApp(os.environ.get('TELLY_TOKEN', ''), canvas, store, catalogs), a.host, a.port or 8080)
+        lyrics = Lyrics(os.environ.get('TELLY_LYRICS_URL', ''), os.environ.get('TELLY_LYRICS_TOKEN', ''))
+        genius = Genius(store, llm, os.environ.get('TELLY_GENIUS_TOKEN', ''))
+        serve(PublicApp(os.environ.get('TELLY_TOKEN', ''), canvas, store, catalogs, lyrics=lyrics, genius=genius), a.host, a.port or 8080)
     else:
         vault = Vault(a.vault)
         migrate_secrets(store, vault)
