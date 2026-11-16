@@ -3,8 +3,10 @@ the song's own story. Read from Genius's JSON (with TELLY_GENIUS_TOKEN its offic
 pages read), condensed by the model into the few things a friend would lean over and say, and kept: each song costs one
 look, made in the background while its lyrics are being timed.
 
-Each note belongs to a fragment of the lyrics, and is placed on the line of the recording's lyrics where that fragment
-begins when the lyrics are asked for (they change version as they are romanised or refreshed; placing is cheap).
+Each note belongs to a passage of the lyrics (an annotation often covers two or four lines), and is placed on the lines
+of the recording's lyrics that passage covers, from where it begins to where it ends, when the lyrics are asked for
+(they change version as they are romanised or refreshed; placing is cheap). The page itself is read once and kept raw,
+so the per-song notes in a playlist are written from it too.
 """
 import json
 import logging
@@ -25,7 +27,7 @@ BROWSER = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko
 KEEP_NONE = 14 * 86400   # "Genius has no page for it" is asked again after a fortnight
 RETRY = 15 * 60          # a failed look (network, the model) is tried again after this
 STALE = 30               # a song not asked about for this long (the phone asks every few seconds) was skipped past
-RULES = 2                # bump when the prompt's rules change: cached notes from older rules are written again
+RULES = 3                # bump when the prompt's rules change: cached notes from older rules are written again
 TOOL = {
     'name': 'trivia',
     'description': 'What a friend would say while this song plays.',
@@ -37,7 +39,7 @@ TOOL = {
             'lines': {'type': 'array', 'items': {
                 'type': 'object',
                 'properties': {'n': {'type': 'integer'}, 'text': {'type': 'string', 'description': 'At most 22 words; empty to skip'},
-                               'roman': {'type': 'string', 'description': "Only for a line not in Latin letters: its first line in Latin letters"}},
+                               'roman': {'type': 'string', 'description': 'Only for a passage not in Latin letters: all of it in Latin letters, one line per line'}},
                 'required': ['n', 'text']}},
         },
         'required': ['about', 'lines'],
@@ -80,22 +82,48 @@ def pick(hits, title, artist):
 
 
 def place(refs, lines):
-    """[{'fragment', 'text'}] onto the lyrics -> [{'line': i, 'text'}]: each note on the first line its fragment begins
-    (a chorus is explained once), at most one per line. Fragments that are only a section's name ("[Verse 2]") can't
-    be placed on lines that don't carry sections, and are left out."""
+    """[{'fragment', 'roman', 'text'}] onto the lyrics -> [{'line': i, 'end': j, 'text'}]: each note on the passage its
+    fragment covers, from the line it begins on to the last line it runs into (a chorus is explained once, where it
+    first comes), no two passages overlapping. Fragments that are only a section's name ("[Verse 2]") can't be placed
+    on lines that don't carry sections, and are left out."""
     plain = [_plain(l.get('text') or '') for l in lines]
     out, used = [], set()
     for ref in refs:
-        # Its first sung line ("[Verse 1]\nMama, just killed a man" begins at "Mama"), as written and in Latin letters
-        # (lyrics in Hindi or Bengali are shown romanised).
-        bare = re.sub(r'\[[^\]]*\]', '', ref.get('fragment') or '')
-        first = next((x for x in bare.split('\n') if _plain(x)), '')
-        tries = [f for f in (_plain(first), _plain(ref.get('roman') or '')) if len(f) >= 6]
-        hit = next((i for f in tries for i, l in enumerate(plain) if l and i not in used and _same_line(f, l)), None)
-        if hit is not None:
-            used.add(hit)
-            out.append({'line': hit, 'text': ref['text']})
+        # The passage as written, and in Latin letters (lyrics in Hindi or Bengali are shown romanised); section names
+        # dropped, so "[Verse 1]\nMama, just killed a man" begins at "Mama".
+        written = [x for x in re.sub(r'\[[^\]]*\]', '', ref.get('fragment') or '').split('\n') if _plain(x)]
+        roman = [x for x in (ref.get('roman') or '').split('\n') if _plain(x)]
+        for passage in (written, roman):
+            first = _plain(passage[0]) if passage else ''
+            if len(first) < 6:
+                continue
+            hit = next((i for i, l in enumerate(plain) if l and i not in used and _same_line(first, l)), None)
+            if hit is None:
+                continue
+            end = _runs_to(plain, hit, _plain(' '.join(passage)), used)
+            used.update(range(hit, end + 1))
+            out.append({'line': hit, 'end': end, 'text': ref['text']})
+            break
     return sorted(out, key=lambda x: x['line'])
+
+
+def _runs_to(plain, start, whole, used):
+    """The last line, from `start`, that the passage `whole` covers: the lines after it while each is the next stretch of
+    the passage (spellings may differ a little). A blank line (a pause in the singing) ends it."""
+    first = plain[start]
+    pos = len(first) if whole.startswith(first) else min(len(first), len(whole))
+    end = start
+    for j in range(start + 1, len(plain)):
+        rest = whole[pos:].lstrip()
+        line = plain[j]
+        if len(rest) < 4 or not line or j in used:
+            break
+        n = min(len(rest), len(line))
+        if rest[:n] != line[:n] and SequenceMatcher(None, rest[:n], line[:n]).ratio() < 0.8:
+            break
+        pos = len(whole) - len(rest) + n
+        end = j
+    return end
 
 
 def _same_line(f, l):
@@ -128,6 +156,18 @@ class Genius:
         except (urllib.error.URLError, TimeoutError, ValueError) as e:
             raise Unreachable(f'{path}: {e}') from None
 
+    def page(self, title, artist):
+        """Genius's page for the song, read once and kept as it is (the notes in a playlist and the whispers in the
+        lyrics are both written from it) -> the page, or None when Genius has none. A failed read raises Unreachable
+        and keeps nothing."""
+        k = f'gpage1:{nartist(first_artist(artist))}|{ntrack(title)}'
+        got = self.store.get(k)
+        if got and (got.get('page') or time.time() - got.get('ts', 0) < KEEP_NONE):
+            return got.get('page')
+        page = self.look(title, artist)
+        self.store.put(k, {'page': page, 'ts': time.time()})
+        return page
+
     def look(self, title, artist):
         """Genius's page for the song -> {'id', 'url', 'title', 'about', 'released', 'links', 'refs'} or None."""
         bare = re.sub(r'\s*[(\[].*?[)\]]', '', title).strip() or title  # "(From …)", "(Remastered)": not in Genius's titles
@@ -149,10 +189,11 @@ class Genius:
                 a = (r.get('annotations') or [{}])[0]
                 body = ((a.get('body') or {}).get('plain') or '').strip()
                 if body and r.get('fragment'):
-                    refs.append({'fragment': r['fragment'], 'body': body, 'votes': a.get('votes_total') or 0,
+                    refs.append({'fragment': r['fragment'][:600], 'body': body[:900], 'votes': a.get('votes_total') or 0,
                                  'verified': bool(a.get('verified'))})
             if len(got) < 50:
                 break
+        refs = sorted(refs, key=lambda r: (r['verified'], r['votes']), reverse=True)[:30]  # what's kept: the best read
         return {'id': song['id'], 'url': song.get('url'), 'title': song.get('full_title'),
                 'about': ((full.get('description') or {}).get('plain') or '').strip(),
                 'released': full.get('release_date_for_display'), 'links': links, 'refs': refs}
@@ -166,7 +207,7 @@ class Genius:
         if not refs and not about:
             return {'about': [], 'refs': []}
         listing = '\n'.join(
-            f"[{i}] \"{' / '.join(x.strip() for x in r['fragment'].splitlines() if x.strip())[:160]}\""
+            f"[{i}] \"{' / '.join(x.strip() for x in r['fragment'].splitlines() if x.strip())[:300]}\""
             f"{' (written by the artist)' if r['verified'] else ''}: {' '.join(r['body'].split())[:520]}"
             for i, r in enumerate(refs, 1))
         system = 'You sit next to one listener while a song plays: a well-read friend who loves music, who has just read its Genius page.'
@@ -181,7 +222,7 @@ Annotations on its lines:
 
 Write:
 - about: up to three things you'd say as it starts or in a pause between verses. The most surprising first.
-- lines: for the annotations worth leaning over for, the one thing you'd whisper as that line is sung: what it
+- lines: for the annotations worth leaning over for, the one thing you'd whisper as that passage is sung: what it
   refers to, the story behind it, a double meaning. At most eight, by their numbers.
 
 Rules:
@@ -193,7 +234,8 @@ Rules:
   doesn't name for it. When the text hedges ("may", "some think", "reportedly"), keep the hedge or skip it.
 - Leave out guesses about private lives (love affairs, sexuality, illness, feuds) unless the artist said it in the text.
 - Skip annotations that only restate the line or guess at its feelings ("the protagonist seems to...").
-- For a line not written in Latin letters, also give "roman": its first line in Latin letters, as a listener would type it.
+- For a passage not written in Latin letters, also give "roman": all of it in Latin letters, one line per line, as a
+  listener would type it.
 - Short and plain: "about" at most 24 words, "lines" at most 22. No hype words, no exclamation marks.
 - Don't open every one the same way, and don't address him by name."""
         out = self.llm.tool(system, user, TOOL, max_tokens=1500, timeout=90, retries=1, wait=10)
@@ -230,7 +272,7 @@ Rules:
 
     def _work(self, k, title, artist):
         try:
-            page = self.look(title, artist)
+            page = self.page(title, artist)
             if page is None:
                 self.store.put(k, {'none': True, 'ts': time.time()})
                 return

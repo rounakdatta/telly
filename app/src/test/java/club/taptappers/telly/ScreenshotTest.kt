@@ -197,7 +197,7 @@ class ScreenshotTest {
             ),
             words = WordsStatus("ready", 42, 56),
             trivia = Trivia("ready", listOf("It was the first single from A Night at the Opera, Queen's fourth album."),
-                listOf(LineNote(0, "It opens a cappella: Freddie's voice, layered into a choir.")), "https://genius.com/Queen-bohemian-rhapsody-lyrics"),
+                listOf(LineNote(0, 1, "It opens a cappella: Freddie's voice, layered into a choir.")), "https://genius.com/Queen-bohemian-rhapsody-lyrics"),
         )
 
         private fun tr(n: Int, title: String, artist: String, pool: String, note: String? = null, pinned: Boolean = false) =

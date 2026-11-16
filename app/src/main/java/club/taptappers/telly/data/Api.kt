@@ -36,6 +36,8 @@ class Api(private val prefs: Prefs) {
         .readTimeout(120, TimeUnit.SECONDS) // a message goes through the language model; the server gives up first
         .build()
     private val jsonType = "application/json; charset=utf-8".toMediaType()
+    /** For the long poll (the server answers within 8 s): a connection that died is noticed in seconds, not minutes. */
+    private val poll = http.newBuilder().readTimeout(15, TimeUnit.SECONDS).build()
 
     suspend fun day(day: String = "today"): Day = get("/api/day/$day", Day.serializer())
     suspend fun session(id: String): Session = get("/api/session/$id", Session.serializer())
@@ -59,7 +61,8 @@ class Api(private val prefs: Prefs) {
     }
 
     /** What the phone plays, as LeZeppLean's helper reports it; with `since`, waits (up to `wait` s) for a change. */
-    suspend fun now(since: Int, wait: Int): PhoneView = get("/api/now?since=$since&wait=$wait", PhoneView.serializer())
+    suspend fun now(since: Int, wait: Int): PhoneView =
+        decode(call(poll) { url -> Request.Builder().url(url("/api/now?since=$since&wait=$wait")).get().build() }, PhoneView.serializer())
 
     /** A song's lyrics again; with `known`, the lines are left out when they haven't changed. */
     suspend fun lyrics(songId: String, known: String?): LyricsResult =
@@ -85,7 +88,7 @@ class Api(private val prefs: Prefs) {
      * Every failure becomes a TellyError worded for a person, including the ones that happen before anything is sent:
      * a malformed address or a token with a stray character must show a message, never crash the app on every launch.
      */
-    private suspend fun call(build: ((String) -> String) -> Request): String = withContext(Dispatchers.IO) {
+    private suspend fun call(client: OkHttpClient = http, build: ((String) -> String) -> Request): String = withContext(Dispatchers.IO) {
         val base = prefs.server.trim().trimEnd('/')
         if (!base.startsWith("https://")) throw TellyError("The server address must start with https://. Check it in Settings.")
         val authed = try {
@@ -94,7 +97,7 @@ class Api(private val prefs: Prefs) {
             throw TellyError("That server address or token isn't valid. Check them in Settings.")
         }
         try {
-            http.newCall(authed).execute().use { r ->
+            client.newCall(authed).execute().use { r ->
                 val body = r.body?.string().orEmpty()
                 when {
                     r.isSuccessful -> body
