@@ -38,7 +38,11 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            // R8 on: Compose without it runs unoptimised (and noticeably less smooth). CI building this variant proves it
+            // compiles, not that it runs: a missing keep rule only shows on a phone, so open the release APK after
+            // touching anything found by name (proguard-rules.pro lists those).
+            isMinifyEnabled = true
+            isShrinkResources = true
             if (releaseKeystore != null) signingConfig = signingConfigs.getByName("release")
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }

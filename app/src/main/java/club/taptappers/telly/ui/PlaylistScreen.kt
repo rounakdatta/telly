@@ -3,6 +3,15 @@
 package club.taptappers.telly.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.draw.clip
 import androidx.compose.material3.CircularProgressIndicator
@@ -59,12 +68,12 @@ import club.taptappers.telly.data.Track
 import dev.chrisbanes.haze.HazeState
 
 val TWEAKS = listOf("familiar" to "More familiar", "new" to "More new", "calmer" to "Calmer", "energy" to "More energy",
-    "shorter" to "Shorter", "longer" to "Longer", "reshuffle" to "Reshuffle")
+    "instrumental" to "Instrumental", "shorter" to "Shorter", "longer" to "Longer", "reshuffle" to "Reshuffle")
 
 class PlaylistActions(
     val onBack: () -> Unit,
     val onOpenUrl: (String) -> Unit,
-    val onTweak: (String) -> Unit,
+    val onTweak: (String, String) -> Unit,
     val onUndo: () -> Unit,
     val onSwap: (Int) -> Unit,
     val onRemove: (Int) -> Unit,
@@ -74,12 +83,15 @@ class PlaylistActions(
 )
 
 @Composable
-fun PlaylistScreen(s: Session, working: String?, haze: HazeState, actions: PlaylistActions, bottomSpace: androidx.compose.ui.unit.Dp) {
+fun PlaylistScreen(s: Session, working: String?, updating: Boolean, fresh: Set<String>, haze: HazeState, actions: PlaylistActions,
+                   bottomSpace: androidx.compose.ui.unit.Dp) {
     val top = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
     val list = rememberLazyListState()
     val scrolled by remember { derivedStateOf { list.firstVisibleItemIndex > 0 || list.firstVisibleItemScrollOffset > 40 } }
     var sheet by remember { mutableStateOf<Int?>(null) }
     val accent = hourTint((s.start?.substringBefore(":")?.toIntOrNull()) ?: 12)
+    // While a change is being made the list steps back a little, so it's plain the old list is on its way out.
+    val listAlpha by animateFloatAsState(if (updating) 0.45f else 1f, tween(260), label = "updating")
 
     Box(Modifier.fillMaxSize()) {
         Ambient(accent, art = s.tracks.firstOrNull { it.thumb != null }?.thumb)
@@ -90,11 +102,17 @@ fun PlaylistScreen(s: Session, working: String?, haze: HazeState, actions: Playl
             item(key = "hero") { Hero(s) }
             item(key = "actions") { PlayRow(s, working, actions) }
             item(key = "tweaks") { Tweaks(s, working, actions) }
+            item(key = "progress") {
+                Box(Modifier.fillMaxWidth().height(2.dp).padding(horizontal = 20.dp)) {
+                    if (updating) LinearProgressIndicator(Modifier.fillMaxWidth(), color = accent, trackColor = Color.Transparent)
+                }
+            }
             itemsIndexed(s.tracks, key = { _, t -> t.id }) { i, t ->
-                TrackRow(t, accent, onClick = { sheet = i }, modifier = Modifier.animateItem())
+                TrackRow(t, accent, fresh = t.id in fresh, onClick = { sheet = i },
+                    modifier = Modifier.animateItem().graphicsLayer { alpha = listAlpha })
             }
             item(key = "notes") { LinerNotes(s) }
-            item(key = "log") { History(s) }
+            item(key = "log") { Conversation(s) }
         }
         TopBar(s.name, scrolled, haze, actions)
     }
@@ -198,28 +216,42 @@ private fun Tweaks(s: Session, working: String?, actions: PlaylistActions) {
             item(key = "undo") { Chip("Undo", { actions.onUndo() }, icon = R.drawable.ic_undo, busy = working == "undo", enabled = working == null) }
         }
         TWEAKS.forEach { (key, label) ->
-            item(key = key) { Chip(label, { actions.onTweak(key) }, busy = working == key, enabled = working == null) }
+            item(key = key) {
+                // Instrumental is a switch, not a nudge: it shows whether it is on, and a second tap brings vocals back.
+                val on = key == "instrumental" && s.brief.instrumental
+                Chip(label, { actions.onTweak(key, if (on) "Bring vocals back" else label) }, busy = working == key,
+                    enabled = working == null, selected = on)
+            }
         }
     }
 }
 
 @Composable
-private fun TrackRow(t: Track, accent: Color, onClick: () -> Unit, modifier: Modifier = Modifier) {
+private fun TrackRow(t: Track, accent: Color, fresh: Boolean, onClick: () -> Unit, modifier: Modifier = Modifier) {
+    // A song that just arrived glows for a moment, then settles: what changed is visible without a word.
+    val glow by animateFloatAsState(if (fresh) 1f else 0f, tween(if (fresh) 300 else 1600), label = "fresh")
     Row(
-        modifier.fillMaxWidth().clickable(onClickLabel = "Options for ${t.title}", onClick = onClick).padding(horizontal = 20.dp, vertical = 7.dp),
-        verticalAlignment = Alignment.CenterVertically,
+        modifier.fillMaxWidth().drawBehind { if (glow > 0f) drawRect(accent.copy(alpha = 0.16f * glow)) }
+            .clickable(onClickLabel = "Options for ${t.title}", onClick = onClick).padding(horizontal = 20.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.Top,
     ) {
         Art(t.thumb, t.id, 52.dp, 8.dp)
         Spacer(Modifier.width(14.dp))
-        Column(Modifier.weight(1f)) {
-            Text(t.title, style = T.bodyStrong, color = C.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Column(Modifier.weight(1f).padding(top = 3.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(t.title, style = T.bodyStrong, color = C.text, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+                if (t.pinned) {
+                    Icon(painterResource(R.drawable.ic_pin), contentDescription = "Kept in place", tint = C.text3, modifier = Modifier.padding(start = 6.dp).size(14.dp))
+                }
+                Spacer(Modifier.weight(1f))
+                t.mark?.let { Text(it, style = T.small, color = if (t.new) accent.copy(alpha = 0.95f) else C.text3, modifier = Modifier.padding(start = 10.dp)) }
+            }
             Text(t.artist, style = T.caption, color = C.text2, maxLines = 1, overflow = TextOverflow.Ellipsis)
-        }
-        if (t.pinned) {
-            Icon(painterResource(R.drawable.ic_pin), contentDescription = "Kept in place", tint = C.text3, modifier = Modifier.padding(start = 8.dp).size(16.dp))
-        }
-        t.mark?.let {
-            Text(it, style = T.small, color = if (t.new) accent.copy(alpha = 0.95f) else C.text3, modifier = Modifier.padding(start = 10.dp))
+            // The friend leaning over: arrives a little after the playlist, so it fades in rather than pops.
+            AnimatedVisibility(visible = t.note != null, enter = fadeIn(tween(500)) + expandVertically(tween(300))) {
+                Text(t.note.orEmpty(), style = T.caption, color = C.text.copy(alpha = 0.6f), maxLines = 3, overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(top = 5.dp))
+            }
         }
     }
 }
@@ -247,17 +279,21 @@ private fun LinerNotes(s: Session) {
     }
 }
 
+/** Everything said about this playlist, as the conversation it was: your words on the right, telly's on the left. */
 @Composable
-private fun History(s: Session) {
-    val log = s.log.filter { !it.said.isNullOrBlank() || !it.reply.isNullOrBlank() }.takeLast(6)
+private fun Conversation(s: Session) {
+    val log = s.log.filter { !it.said.isNullOrBlank() || !it.reply.isNullOrBlank() }.takeLast(8)
     if (log.isEmpty()) return
-    Column(Modifier.fillMaxWidth().padding(horizontal = 24.dp).padding(top = 30.dp)) {
-        Text("How it got here", style = T.small, color = C.text3)
+    Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp).padding(top = 30.dp)) {
+        Text("Conversation", style = T.small, color = C.text3, modifier = Modifier.padding(start = 4.dp, bottom = 4.dp))
         log.forEach { e ->
-            Column(Modifier.padding(top = 12.dp)) {
-                e.said?.let { Text(it, style = T.caption, color = C.text2) }
-                e.reply?.let { Text(it, style = T.caption, color = C.text3, modifier = Modifier.padding(top = 2.dp)) }
+            e.said?.let {
+                Row(Modifier.fillMaxWidth().padding(top = 10.dp), horizontalArrangement = Arrangement.End) {
+                    Text(it, style = T.caption, color = C.text, modifier = Modifier.widthIn(max = 280.dp).clip(RoundedCornerShape(14.dp))
+                        .background(C.glass).padding(horizontal = 12.dp, vertical = 7.dp))
+                }
             }
+            e.reply?.let { Text(it, style = T.caption, color = C.text2, modifier = Modifier.padding(start = 4.dp, top = 6.dp, end = 40.dp)) }
         }
     }
 }
@@ -275,7 +311,8 @@ private fun TrackSheet(t: Track, i: Int, s: Session, actions: PlaylistActions, o
                     Text(t.artist, style = T.caption, color = C.text2, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
             }
-            if (t.why.isNotBlank()) Text(t.why, style = T.caption, color = C.text3, modifier = Modifier.padding(top = 14.dp))
+            t.note?.let { Text(it, style = T.body, color = C.text.copy(alpha = 0.88f), modifier = Modifier.padding(top = 14.dp)) }
+            if (t.why.isNotBlank()) Text(t.why, style = T.caption, color = C.text3, modifier = Modifier.padding(top = 10.dp))
             Spacer(Modifier.height(10.dp))
             val list = s.ytm.url?.substringAfter("list=", "")?.takeIf { it.isNotEmpty() }
             if (t.ytm != null) {

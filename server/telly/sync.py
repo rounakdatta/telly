@@ -12,6 +12,7 @@ import threading
 import time
 import traceback
 
+from . import notes as notes_mod
 from . import spotify as sp_mod
 from . import story as story_mod
 from . import ytm as ytm_mod
@@ -60,7 +61,7 @@ class Worker(threading.Thread):
         super().__init__(daemon=True, name='worker')
         self.store, self.services, self.canvas, self.poll = store, services, canvas, poll
         self._status_at = 0
-        self.stories = []  # sessions whose playlists are synced and whose story is still to write
+        self.after = []  # (kind, session) to do once nothing waits to sync: 'notes' (quick, seen in the list) before 'story'
 
     def run(self):
         # A job leaves the queue when its work starts, so a restart mid-sync (every deploy) would strand it: put
@@ -74,9 +75,12 @@ class Worker(threading.Thread):
                 sid = self.store.claim()
                 if sid:
                     self.sync(sid)
-                elif self.stories:
-                    # Stories are slow (Wikipedia, then the model), so they wait until no playlist is waiting to sync.
-                    self._story(self.stories.pop(0))
+                elif self.after:
+                    # Notes and stories are slow (Wikipedia, then the model), so they wait until no playlist is waiting
+                    # to sync; notes go first, because they show in the list.
+                    i = next((k for k, (kind, _) in enumerate(self.after) if kind == 'notes'), 0)
+                    kind, sid = self.after.pop(i)
+                    (self._notes if kind == 'notes' else self._story)(sid)
                 else:
                     time.sleep(self.poll)
             except Exception:
@@ -133,8 +137,9 @@ class Worker(threading.Thread):
             self.store.update_session(sid, **{k: 'pending' for k in ('ytm_state', 'sp_state') if latest.get(k) == 'synced'})
             self.store.enqueue(sid)
             return
-        if sid not in self.stories:
-            self.stories.append(sid)
+        for kind in ('notes', 'story'):
+            if (kind, sid) not in self.after:
+                self.after.append((kind, sid))
 
     def _remote_title(self, s):
         return f"{s['title'][:1].upper()}{s['title'][1:]} · {time.strftime('%-d %b', time.strptime(s['day'], '%Y-%m-%d'))}"
@@ -238,6 +243,32 @@ class Worker(threading.Thread):
         except Exception as e:
             log.error('spotify sync %s: %s', sid, traceback.format_exc()[-500:])
             self.store.update_session(sid, sp_state='error', sp_error=str(e)[:200])
+
+    def _notes(self, sid):
+        s = self.store.session(sid)
+        if not s or s['deleted']:
+            return
+        v = self.store.version(sid)
+        llm = self.canvas.llm
+        if not llm.ready:
+            self.store.update_session(sid, notes_state='none')
+            return
+        self.store.update_session(sid, notes_state='writing')
+        b = v['brief']
+        moment = f"{s['title']} ({b['activity']}) on {time.strftime('%A %-d %B', time.strptime(s['day'], '%Y-%m-%d'))}"
+        try:
+            # One batch per turn, so a playlist waiting to sync goes first; the next batch follows while that one made
+            # progress (a turn that wrote nothing, say with Wikipedia down and the model passing, ends it).
+            left = len(notes_mod.unwritten(v['tracks'], self.store))
+            notes_mod.write(llm, self.canvas.about, moment, v['tracks'], self.store, batches=1)
+            still = len(notes_mod.unwritten(v['tracks'], self.store))
+            if still and still < left:
+                self.after.insert(0, ('notes', sid))
+                return
+            self.store.update_session(sid, notes_state='ready')
+        except Exception as e:
+            log.warning('notes %s: %s', sid, str(e)[:200])
+            self.store.update_session(sid, notes_state='none')
 
     def _story(self, sid):
         s = self.store.session(sid)

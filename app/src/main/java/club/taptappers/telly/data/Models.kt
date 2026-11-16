@@ -38,6 +38,8 @@ data class Session(
     val ytm: Remote = Remote(),
     val spotify: Remote = Remote(),
     val story: Story = Story(),
+    @SerialName("notes_state") val notesState: String = "none",
+    val brief: Brief = Brief(),
     val weather: String? = null,
     val log: List<LogEntry> = emptyList(),
     val created: Double = 0.0,
@@ -48,12 +50,26 @@ data class Session(
 
     /** Still settling: a playlist being written to a service, or a story being written. */
     val settling: Boolean
-        get() = ytm.state in BUSY || spotify.state in BUSY || story.state in setOf("pending", "writing")
+        get() = ytm.state in BUSY || spotify.state in BUSY || story.state in WRITING || notesState in WRITING
+
+    /** The one thing still happening in the background, in words, or null when it has all settled. */
+    val inProgress: String?
+        get() = when {
+            ytm.state in BUSY -> "Saving to YouTube Music…"
+            spotify.state in BUSY -> "Saving to Spotify…"
+            notesState in WRITING -> "Writing a note for each song…"
+            story.state in WRITING -> "Writing the liner notes…"
+            else -> null
+        }
 
     companion object {
         val BUSY = setOf("pending", "syncing")
+        val WRITING = setOf("pending", "writing")
     }
 }
+
+@Serializable
+data class Brief(val instrumental: Boolean = false, val familiar: Double = 0.7)
 
 @Serializable
 data class Track(
@@ -70,6 +86,8 @@ data class Track(
     @SerialName("duration_s") val durationS: Int = 0,
     val ytm: String? = null,
     val spotify: String? = null,
+    /** One line about the song, as an excited friend would say it; arrives a little after the playlist. */
+    val note: String? = null,
 ) {
     /** Favourites and well-known songs are the normal case and carry no mark; only the exceptions do. */
     val mark: String?

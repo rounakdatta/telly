@@ -10,6 +10,7 @@ A brief is a plain dict (see `normalize`); a playlist is a list of track dicts w
 """
 import math
 import random
+import re
 import time
 from collections import Counter
 
@@ -196,13 +197,24 @@ def new_score(c):
     return base * (0.4 + 0.15 * (c.get('adjacency') or 0)) * (o ** 0.6)
 
 
+INSTRUMENTAL_TITLE = re.compile(r'(?i)\b(instrumental|theme|bgm|score|suite|interlude|prelude|overture|nocturne|sonata|concerto|'
+                                r'etude|piano|flute|sitar|santoor|sarod|violin|cello)\b')
+
+
+def instrumental_ok(t):
+    """No vocals? LRCLIB decides when it knows the song (tools/enrich_vocals.py: 0 = instrumental, 1 = has lyrics); the
+    audio features can't (they call Billie Eilish and Corona instrumental). Unknown to LRCLIB: only a title that says so."""
+    v = t.get('vocals')
+    if v is not None:
+        return v == 0
+    return bool(INSTRUMENTAL_TITLE.search(t.get('title') or ''))
+
+
 def fit(t, c, target_e):
     """How well a track fits the moment's sound. Unknown audio features are neutral, not rejected."""
     e, tempo = t.get('energy'), t.get('tempo')
-    if c.get('instrumental'):
-        ins = t.get('instrumentalness')
-        if ins is None or ins < 0.45 or (t.get('speechiness') or 0) > 0.2:
-            return 0.0
+    if c.get('instrumental') and not instrumental_ok(t):
+        return 0.0
     if e is None:
         if c.get('min_energy') is not None:  # runs: never gamble on an unknown new song
             return 0.0 if str(t.get('pool', t.get('kind', ''))).startswith('new') else 0.5
@@ -257,6 +269,7 @@ class Builder:
         self.origins = set(brief['origins'])
         self.mid_e = (self.c['energy'][0] + self.c['energy'][1]) / 2
         self.pools = self._pools()
+        self.notes = []  # what the listener should hear about this build (e.g. it came out short)
 
     def _pools(self):
         P = {}
@@ -344,7 +357,31 @@ class Builder:
                 ids.add(t['id'])
                 per_artist[t.get('artist_key')] += 1
                 got += 1
+        self.fill(picked, ids, per_artist)
         return self.enforce_wants(self.trim(sequence(picked, self.c)))
+
+    def fill(self, picked, ids, per_artist):
+        """When the pools' shares come up short of the time (narrow filters do that: instrumental, one origin, a run's
+        energy floor), top up with the best of what fits from any pool, familiar ones first; then say if it's still
+        short, rather than hand over 12 minutes for a 40-minute ask in silence."""
+        budget = self.b['minutes'] * 60_000
+        total = sum(dur_ms(t) for t in picked)
+        if total >= budget - 120_000:
+            return
+        for pools in (('comfort', 'familiar', 'forgotten', 'warm'), ('new_known', 'new_frontier')):
+            ranked = sorted(((self.score(t, p), p, t) for p in pools for t in self.pools.get(p, [])), key=lambda x: -x[0])
+            for s, p, t in ranked:
+                if total >= budget or s <= 0:
+                    break
+                if t['id'] in ids or per_artist[t.get('artist_key')] >= 3:
+                    continue
+                picked.append(dict(t, pool=p))
+                ids.add(t['id'])
+                per_artist[t.get('artist_key')] += 1
+                total += dur_ms(t)
+        if total < budget * 0.7:
+            what = 'instrumental songs' if self.c.get('instrumental') else 'songs'
+            self.notes.append(f'Only {round(total / 60000)} minutes of {what} fit this, so it is shorter than you asked.')
 
     def _matcher(self, w):
         keys = self.cat.artist_keys([w['artist']]) if w.get('artist') else None
@@ -549,8 +586,13 @@ def rebuild(cat, brief, hour, prev_tracks, served, sticky=True, now=None):
 
 TWEAKS = {
     'familiar': 'More familiar', 'new': 'More new', 'calmer': 'Calmer', 'energy': 'More energy',
-    'shorter': 'Shorter', 'longer': 'Longer', 'reshuffle': 'Reshuffle',
+    'instrumental': 'Instrumental', 'shorter': 'Shorter', 'longer': 'Longer', 'reshuffle': 'Reshuffle',
 }
+
+
+def is_instrumental(brief):
+    """Instrumental-only right now: set on the brief, or the activity's own default (focus)."""
+    return bool(brief.get('instrumental', ACTIVITIES[brief['activity']].get('instrumental', False)))
 
 
 def tweak(brief, name):
@@ -568,12 +610,15 @@ def tweak(brief, name):
         b['minutes'] = min(600, b['minutes'] + max(10, int(round(b['minutes'] * 0.33 / 5) * 5)))
     elif name == 'reshuffle':
         b['seed'] = random.randrange(1, 10**9)
+    elif name == 'instrumental':
+        b['instrumental'] = not is_instrumental(b)  # a toggle: tap again for vocals
     return normalize(b)
 
 
 TWEAK_REPLY = {
     'familiar': 'More songs you know.', 'new': 'More songs new to you.', 'calmer': 'Brought the energy down.',
     'energy': 'Turned the energy up.', 'shorter': 'Made it shorter.', 'longer': 'Made it longer.', 'reshuffle': 'A fresh pick, same brief.',
+    'instrumental': 'Instrumental only now.', 'vocals': 'Vocals are back.',
 }
 
 
@@ -614,7 +659,8 @@ def summary(brief, tracks):
         'winds down' if e1 < e0 - 0.05 else ('builds up' if e1 > e0 + 0.05 else 'stays steady'))
     known = 'All familiar' if n_new == 0 else ('Mostly familiar' if n_new <= len(tracks) / 3 else 'Mostly new to you')
     bits = [known] + ([f'{n_new} new'] if n_new else []) + ([f'{n_forgot} forgotten favourite{"s" if n_forgot > 1 else ""}'] if n_forgot else [])
-    return f"{', '.join(bits)}. It {arc}."
+    lead = 'Instrumental. ' if is_instrumental(brief) else ''
+    return f"{lead}{', '.join(bits)}. It {arc}."
 
 
 def duration_ms(tracks):

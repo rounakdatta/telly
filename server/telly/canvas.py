@@ -73,6 +73,7 @@ class Canvas:
         v = v or self.store.version(s['id'])
         b, tracks = v['brief'], v['tracks']
         cache = self.store.resolved([t['id'] for t in tracks])
+        notes = {k: v for k, v in self.store.notes_for([t['id'] for t in tracks]).items() if v}
         rows = []
         for i, t in enumerate(tracks):
             r = cache.get(t['id']) or {}
@@ -80,7 +81,7 @@ class Canvas:
             thumb = r.get('thumb') or (f'https://i.ytimg.com/vi/{vid}/mqdefault.jpg' if vid else None)
             rows.append({'n': i + 1, 'id': t['id'], 'title': t['title'], 'artist': t['artist'], 'pool': t.get('pool'),
                          'tag': E.TAG.get(t.get('pool'), ''), 'why': E.why(t), 'new': str(t.get('pool', '')).startswith('new'),
-                         'pinned': bool(t.get('pinned')), 'thumb': thumb, 'duration_s': round(E.dur_ms(t) / 1000),
+                         'pinned': bool(t.get('pinned')), 'thumb': thumb, 'duration_s': round(E.dur_ms(t) / 1000), 'note': notes.get(t['id']),
                          'ytm': vid, 'spotify': t.get('spotify_uri') or r.get('sp_uri')})
         start = b.get('start')
         story = s.get('story')
@@ -89,7 +90,9 @@ class Canvas:
             'start_label': clock(start) if start else None, 'minutes': b['minutes'],
             'duration_min': round(E.duration_ms(tracks) / 60000), 'count': len(tracks),
             'summary': E.summary(b, tracks), 'blurb': E.ACTIVITIES[b['activity']]['blurb'],
-            'brief': {k: b.get(k) for k in ('familiar', 'energy', 'worlds', 'origins', 'include_artists', 'exclude_artists', 'instrumental')},
+            'brief': dict({k: b.get(k) for k in ('familiar', 'energy', 'worlds', 'origins', 'include_artists', 'exclude_artists')},
+                          instrumental=E.is_instrumental(b)),
+            'notes_state': s.get('notes_state') or 'none',
             'tracks': rows, 'version': v['n'], 'can_undo': bool(v.get('parent')), 'created': s['created'], 'updated': s['updated'],
             'ytm': {'state': s.get('ytm_state') or 'pending', 'url': ytm_url(s['ytm_id']) if s.get('ytm_id') else None,
                     'play': (f"https://music.youtube.com/watch?v={rows[0]['ytm']}&list={s['ytm_id']}" if s.get('ytm_id') and rows and rows[0]['ytm']
@@ -132,8 +135,8 @@ class Canvas:
             actions, tw = interpret.fallback(text, self.place, focus_brief)
             rough = True
             if tw and focus:
-                self.tweak(focus, tw, said=text)
-                return {'reply': E.TWEAK_REPLY[tw], 'focus': focus, 'day': self.day(day), 'rough': True}
+                done = self.tweak(focus, tw, said=text)  # its reply carries the build's own notes ("only 9 fit")
+                return {'reply': done['note'], 'focus': focus, 'day': self.day(day), 'rough': True}
             if not actions:
                 return {'reply': "I can't read that right now (the language model is unreachable). The buttons still work.",
                         'focus': focus, 'day': self.day(day), 'rough': True}
@@ -153,6 +156,8 @@ class Canvas:
                     continue
                 if sid:
                     last = sid
+                elif a.get('delete') and a.get('target') == last:
+                    last = None  # the playlist he was looking at is gone: there is nothing to point him back to
                 if a.get('reply'):
                     replies.append(a['reply'].strip())
         return {'reply': ' '.join(replies) or say or "I couldn't turn that into a change.", 'focus': last,
@@ -175,8 +180,9 @@ class Canvas:
             fields.setdefault('start', self.place.now().strftime('%H:%M'))
             brief = E.normalize(fields)
             sid = self.store.new_session(day, brief['title'])
-            order, _ = E.rebuild(cat, brief, int(brief['start'][:2]), [], self._served(sid))
-            self._save(sid, 'prompt', text, a.get('reply'), brief, order)
+            order, bl = E.rebuild(cat, brief, int(brief['start'][:2]), [], self._served(sid))
+            a['reply'] = ' '.join([a.get('reply') or ''] + bl.notes).strip()
+            self._save(sid, 'prompt', text, a['reply'], brief, order)
             return sid
         sid = target
         if a.get('delete'):
@@ -202,7 +208,8 @@ class Canvas:
         if reshuffle:
             new_brief['seed'] = E.normalize({'activity': new_brief['activity']})['seed']
         if reshuffle or any(new_brief.get(k) != brief.get(k) for k in SHAPE):
-            tracks, _ = E.rebuild(cat, new_brief, hour, tracks, self._served(sid), sticky=not reshuffle)
+            tracks, bl = E.rebuild(cat, new_brief, hour, tracks, self._served(sid), sticky=not reshuffle)
+            notes += bl.notes
         reply = ' '.join([a.get('reply') or ''] + notes).strip()
         shape = lambda ts: [(t['id'], bool(t.get('pinned'))) for t in ts]
         if shape(tracks) == shape(v['tracks']) and new_brief == {**brief, 'avoid': new_brief['avoid']}:
@@ -218,9 +225,11 @@ class Canvas:
             v = self.store.version(sid)
             b = E.tweak(v['brief'], name)
             hour = int((b.get('start') or '12:00')[:2])
-            tracks, _ = E.rebuild(self.cat, b, hour, v['tracks'], self._served(sid), sticky=name != 'reshuffle')
-            self._save(sid, 'tweak', said or E.TWEAKS[name], E.TWEAK_REPLY[name], b, tracks)
-        return self.session(sid)
+            tracks, bl = E.rebuild(self.cat, b, hour, v['tracks'], self._served(sid), sticky=name != 'reshuffle')
+            key = name if name != 'instrumental' or E.is_instrumental(b) else 'vocals'
+            reply = ' '.join([E.TWEAK_REPLY[key]] + bl.notes)
+            self._save(sid, 'tweak', said or E.TWEAKS[name], reply, b, tracks)
+        return dict(self.session(sid), note=reply)
 
     def edit(self, sid, op, index, to=None, track_id=None):
         with self.lock:
@@ -273,7 +282,8 @@ class Canvas:
             return None
         self.store.update_session(sid, **{k: 'pending' for k in ('ytm_state', 'sp_state') if s.get(k) not in (None, 'off')})
         self.store.enqueue(sid)
-        return self.session(sid)
+        # A resync makes no version, so the last change's reply would be stale: say what this one does instead.
+        return dict(self.session(sid), note='Saving it to your music apps again.')
 
     # -- the day's lens -------------------------------------------------------------------------------------------------
     def set_lens(self, day, text):
@@ -293,7 +303,8 @@ class Canvas:
     def _save(self, sid, source, said, reply, brief, tracks):
         self.store.add_version(sid, source, said, reply, brief, slim(tracks))
         self.store.mark_served(sid, tracks)
-        self.store.update_session(sid, ytm_state='pending' if self.store.session(sid).get('ytm_state') != 'off' else 'off')
+        self.store.update_session(sid, ytm_state='pending' if self.store.session(sid).get('ytm_state') != 'off' else 'off',
+                                  notes_state='pending')
         self.store.enqueue(sid)
 
 
