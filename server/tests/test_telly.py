@@ -190,6 +190,12 @@ class YtmParseTest(unittest.TestCase):
 
 
 class StorySourceTest(unittest.TestCase):
+    def test_pointers_are_read_as_title_creator_and_kind(self):
+        from telly.story import parse_pointer
+        self.assertEqual(('The Studio', 'John Gregory Dunne', 'book'), parse_pointer('The Studio — John Gregory Dunne (book)'))
+        self.assertEqual(('Song Machine', 'John Seabrook', None), parse_pointer('"Song Machine" - John Seabrook'))
+        self.assertEqual(('Just a title', None, None), parse_pointer('Just a title'))
+
     def test_a_source_must_name_the_song_or_the_artist(self):
         from telly.story import relevant
         teri = {'title': 'Teri Ay', 'artist': 'Umer Farooq'}

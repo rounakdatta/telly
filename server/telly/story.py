@@ -12,6 +12,17 @@ import urllib.request
 UA = {'User-Agent': 'telly/2.0 (personal playlist app; https://github.com/rounakdatta/telly)'}
 ORDER = {'new_frontier': 0, 'new_known': 1, 'forgotten': 2, 'asked': 3, 'familiar': 4, 'warm': 5, 'comfort': 6}
 
+SUBJECTS = {
+    'name': 'subjects',
+    'description': 'Specific Wikipedia articles for today\'s story.',
+    'input_schema': {
+        'type': 'object',
+        'properties': {'titles': {'type': 'array', 'items': {'type': 'string'}, 'maxItems': 4,
+                                  'description': 'Exact English Wikipedia article titles'}},
+        'required': ['titles'],
+    },
+}
+
 TOOL = {
     'name': 'story',
     'description': 'The story for this playlist.',
@@ -89,13 +100,13 @@ def sources_for(tracks, avoid_text, limit=4):
     return found
 
 
-def write(llm, about, moment, tracks, avoid_subjects=(), lens=None, callbacks=()):
+def write(llm, about, moment, tracks, avoid_subjects=(), lens=None, callbacks=(), home=None):
     """moment: when and what ('6 pm run on Sunday 16 November; 25°, light rain'). lens: what he wants to learn about
     today ('20th-century history', 'Indiranagar'), or None. callbacks: earlier stories [(day, title, first line)] the
     story may look back to, when one truly connects. Returns a story dict or None."""
     avoid_text = ' '.join(avoid_subjects).lower()
     found = sources_for(tracks, avoid_text)
-    lens_hit = wiki_pick(lens, avoid_text) if lens else None
+    lens_hit = pick_subject(llm, about, lens, tracks, avoid_text, home) if lens else None
     if not found and not lens_hit:
         return None
     src = '\n\n'.join(f"[{i}] Song in the playlist: {t['title']} by {t['artist']}\nWikipedia, '{h[0]}':\n{h[1]}"
@@ -149,8 +160,69 @@ connecting to something he loves. Rules:{lens_rules}
             'deeper': deeper, 'deeper_checked': verify(deeper), 'source': found[i - 1][1][0]}
 
 
+def wiki_title(title):
+    """The article with exactly this title (following redirects) -> (title, extract), or None."""
+    try:
+        d = _get('https://en.wikipedia.org/w/api.php?' + urllib.parse.urlencode(
+            {'action': 'query', 'prop': 'extracts', 'explaintext': 1, 'exsectionformat': 'plain', 'titles': title,
+             'redirects': 1, 'format': 'json'}))
+        page = next(iter(d['query']['pages'].values()))
+        if 'missing' in page:
+            return None
+        ex = re.sub(r'\n{2,}', '\n', (page.get('extract') or '').strip())
+        return (page['title'], ex[:3500]) if len(ex) > 400 else None
+    except Exception:
+        return None
+
+
+def is_disambiguation(hit):
+    """A list of meanings ('Indira Nagar may refer to several places...') is never a story."""
+    return '(disambiguation)' in hit[0].lower() or bool(re.search(r'\b(may|can) (also )?refer to\b', hit[1][:300]))
+
+
+def pick_subject(llm, about, lens, tracks, avoid_text, home=None):
+    """An article for today's subject. Searching the phrase itself takes it literally ('20th-century history' once
+    found the article on 20th Century Studios), so the model names specific articles under the subject, ideally ones
+    that meet a song, an artist, an era or a place in the playlist, and the first one that exists and hasn't been
+    told recently is used. The literal search remains the fallback."""
+    listing = '\n'.join(f"- {t['title']} — {t['artist']}" for t in tracks[:20])
+    user = f"""He wants to learn about: "{lens}".
+
+Today's playlist:
+{listing}
+
+Name up to four English Wikipedia articles (exact titles) that would each make a fascinating 200-word story under that
+subject: specific events, people, places, works or inventions, never broad overviews, lists or disambiguation pages.
+He lives in {home or 'Bengaluru'}: a place he names is in his city unless he says otherwise, so give its full article
+title (e.g. 'Indiranagar, Bengaluru'). Prefer ones that truly
+meet a song, artist, era or place in this playlist; otherwise ones that would surprise him. Not these, told recently:
+{avoid_text[:1500] or 'none'}"""
+    try:
+        out = llm.tool(f'You choose subjects for one listener\'s daily story. About him: {about}', user, SUBJECTS,
+                       max_tokens=300, timeout=40, retries=1, wait=5)
+        titles = [t for t in out.get('titles') or [] if isinstance(t, str)][:4]
+    except Exception:
+        titles = []
+    for title in titles:
+        if title.lower() in avoid_text:
+            continue
+        time.sleep(0.5)
+        hit = wiki_title(title)
+        if hit and is_disambiguation(hit):
+            # Several places share a name: look for his city's, but only accept an article that carries the same name
+            # ('Teenage Dream (song)' + 'Bengaluru' once found an unrelated actress).
+            name = _plain(re.sub(r'\([^)]*\)', '', title)).split(',')[0].strip()
+            found = wiki(f'{name} {home or ""}'.strip())
+            hit = found if found and name and name in _plain(found[0]) else None
+        if hit and not is_disambiguation(hit) and hit[0].lower() not in avoid_text:
+            return hit
+    hit = wiki_pick(lens, avoid_text)
+    return hit if hit and not is_disambiguation(hit) else None
+
+
 def wiki_pick(query, avoid_text=''):
-    """An article on today's subject, not one already told recently: of the top five hits, the first fresh one."""
+    """The literal fallback: of the top five search hits for the phrase, the first article that is fresh, real and not
+    a list of meanings. Each hit is opened by its exact title (searching for it again once returned an unrelated page)."""
     try:
         s = _get('https://en.wikipedia.org/w/api.php?' + urllib.parse.urlencode(
             {'action': 'query', 'list': 'search', 'srsearch': query, 'format': 'json', 'srlimit': 5}))
@@ -160,29 +232,44 @@ def wiki_pick(query, avoid_text=''):
     for title in titles:
         if title.lower() in avoid_text:
             continue
-        time.sleep(0.8)
-        hit = wiki(title)
-        if hit:
+        time.sleep(0.5)
+        hit = wiki_title(title)
+        if hit and not is_disambiguation(hit):
             return hit
     return None
 
 
+def parse_pointer(line):
+    """'The Studio — John Gregory Dunne (book)' -> ('The Studio', 'John Gregory Dunne', 'book')."""
+    m = re.match(r'^\s*[*_"“]?(.+?)[*_"”]?\s+[—–-]\s+(.+?)\s*(?:\(([^)]*)\))?\s*$', line or '')
+    if not m:
+        return (line or '').strip(' "“”*_'), None, None
+    return m.group(1).strip(' "“”*_'), m.group(2).strip(), (m.group(3) or '').strip().lower() or None
+
+
 def verify(line):
-    """Does the 'go deeper' recommendation exist? Open Library for books, Wikipedia for everything else."""
-    if not line:
-        return False
-    if len(line) > 160 or re.search(r'(?i)\b(actually|alternatively|or try|aside)\b', line):
+    """Does the 'go deeper' recommendation exist, by the creator it names? A title alone isn't enough: 'The Studio'
+    exists, but it is John Gregory Dunne's, not the author it was once credited to. Books are checked with Open
+    Library (title and author together); anything else with Wikipedia (the title, and the creator in its opening)."""
+    if not line or len(line) > 160 or re.search(r'(?i)\b(actually|alternatively|or try|aside)\b', line):
         return False  # a hedge, not a pointer
-    titles = [re.split(r'\s+[—–-]\s+|\s+by\s+|\s*\(', line)[0].strip(' "\'“”*_')]
-    titles += re.findall(r'[\'"“‘]([^\'"”’]{4,80})[\'"”’]', line)
-    for title in titles[:3]:
+    title, creator, kind = parse_pointer(line)
+    if not title:
+        return False
+    last = creator.split()[-1].lower() if creator else None
+    if kind in (None, 'book', 'novel', 'memoir', 'biography'):
         try:
-            ol = _get('https://openlibrary.org/search.json?' + urllib.parse.urlencode({'title': title, 'limit': 1}))
-            if ol.get('numFound'):
-                return True
+            q = {'title': title, 'limit': 5}
+            if creator:
+                q['author'] = creator
+            ol = _get('https://openlibrary.org/search.json?' + urllib.parse.urlencode(q))
+            for doc in ol.get('docs', []):
+                names = ' '.join(doc.get('author_name') or []).lower()
+                if not creator or (last and last in names):
+                    return True
         except Exception:
             pass
-        w = wiki(title)
-        if w and (title.lower()[:12] in w[0].lower() or w[0].lower()[:12] in title.lower()):
-            return True
+    w = wiki(f'{title} {creator or ""}'.strip())
+    if w and (title.lower()[:12] in w[0].lower() or w[0].lower()[:12] in title.lower()):
+        return not last or last in w[1][:1500].lower()
     return False
