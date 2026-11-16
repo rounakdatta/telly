@@ -26,7 +26,11 @@ jobs:
           java-version: '21'
           distribution: 'temurin'
 
+      # The runner already has the SDK; this accepts its licences. The action's default package list still names
+      # 'tools', which the SDK no longer ships, so ask for platform-tools only.
       - uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools'
 
       - uses: gradle/actions/setup-gradle@v4
 
