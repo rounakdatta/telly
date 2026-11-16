@@ -163,6 +163,16 @@ class ScreenshotTest {
     }
 
     @Test
+    fun lyrics_untimed() = shoot("13b-lyrics-untimed") {
+        LyricsScreen(rhapsody.copy(title = "Balam Pichkari", artist = "Vishal Dadlani, Shalmali Kholgade"),
+            LyricsResult(song = SongRef("pplain", "Balam Pichkari", "Vishal Dadlani"), kind = "plain", source = "lrclib",
+                plain = listOf("Itna maza kyun aa raha hai", "Tune hawa mein bhaang milaya", "", "Balam pichkari jo tune mujhe maari",
+                    "Toh seedhi saadi chhori sharaabi ho gayi"),
+                trivia = Trivia("ready", listOf("It's from Yeh Jawaani Hai Deewani, a 2013 film."), listOf(LineNote(3, 4, "A pichkari is the water gun of Holi."))),
+            ), null, null, null, {}, {}, {}, {}, null)
+    }
+
+    @Test
     fun lyrics_nothing_playing() = shoot("13-lyrics-nothing") {
         LyricsScreen(null, null, null, null, null, {}, {}, {}, {}, "6:30 pm run" to "https://music.youtube.com/watch?v=x&list=PLx")
     }

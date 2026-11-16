@@ -53,6 +53,12 @@ class FakeLeZeppLean(BaseHTTPRequestHandler):
         if self.path == '/phone':
             self._send(410, {'detail': 'telly must never report for the phone'})
         elif self.path == '/lyrics':
+            if body.get('song') == 'pplain0000000':  # a song with only untimed words: sent only to who asks
+                out = {'ok': True, 'song': {'id': 'pplain0000000', 'title': 'Balam Pichkari', 'artist': 'Vishal Dadlani', 'durationMs': 289000},
+                       'lyrics': {'version': 'vp', 'kind': 'plain', 'lines': []}, 'words': {'status': 'unavailable'}}
+                if body.get('plain'):
+                    out['plain'] = ['Balam, pichkari', 'Jo tune mujhe maari', '', 'Toh bole re zamaana']
+                return self._send(200, out)
             if body.get('song') != 'p0123456789ab':
                 return self._send(200, {'ok': False, 'reason': 'unknown_song'})
             self._send(200, {'ok': True, 'song': {'id': 'p0123456789ab', 'title': 'Bohemian Rhapsody', 'artist': 'Queen', 'album': None, 'durationMs': 354000},
@@ -220,6 +226,11 @@ class NowApiTest(Base):
         self.assertEqual(400, self.req('GET', '/api/now?since=x')[0])
         self.assertEqual(400, self.req('GET', '/api/now?wait=nan')[0])
         self.assertEqual(429, self.req('GET', '/api/now?since=-1&wait=0')[0], 'asking what plays has an hourly budget (4 here)')
+
+    def test_untimed_words_are_still_the_words(self):
+        code, got = self.req('GET', '/api/lyrics/pplain0000000')
+        self.assertEqual((200, 'plain', []), (code, got['kind'], got['lines']))
+        self.assertEqual(['Balam, pichkari', 'Jo tune mujhe maari', '', 'Toh bole re zamaana'], got['plain'])
 
     def test_without_lyrics_configured_it_says_so(self):
         self.assertEqual(503, self.req('GET', '/api/now', port=self.BARE)[0])

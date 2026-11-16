@@ -45,7 +45,8 @@ class Lyrics:
         return {k: v.get(k) for k in VIEW}
 
     def lyrics(self, song_id):
-        d = self._call('POST', '/lyrics', {'song': song_id})
+        # plain: a song with only untimed words still has its words (LeZeppLean 0.4+ sends them to whoever asks)
+        d = self._call('POST', '/lyrics', {'song': song_id, 'plain': True})
         if not d.get('ok'):
             return {'song': None, 'kind': 'none', 'version': None, 'lines': [], 'words': {'status': 'unavailable'}}
         payload = d.get('lyrics') or {}
@@ -55,4 +56,5 @@ class Lyrics:
             lines.append({'start': int(start or 0), 'text': text or '', 'words': words, 'end': end})
         song = d.get('song') or {}
         return {'song': {k: song.get(k) for k in ('id', 'title', 'artist', 'album', 'durationMs')}, 'kind': payload.get('kind', 'pending'),
-                'version': payload.get('version'), 'lines': lines, 'words': d.get('words') or {'status': 'pending'}}
+                'version': payload.get('version'), 'lines': lines, 'words': d.get('words') or {'status': 'pending'},
+                'plain': [str(x) for x in (d.get('plain') or [])][:400], 'source': d.get('source')}

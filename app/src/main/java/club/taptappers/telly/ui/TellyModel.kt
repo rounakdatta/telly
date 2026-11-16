@@ -426,7 +426,7 @@ class TellyModel(app: Application) : AndroidViewModel(app) {
         while (true) {
             while (!foreground) delay(1000)
             val r = try {
-                api.lyrics(id, got?.version).let { n -> if (n.unchanged) n.copy(lines = got?.lines.orEmpty(), unchanged = false) else n }
+                api.lyrics(id, got?.version).let { n -> if (n.unchanged) n.copy(lines = got?.lines.orEmpty(), plain = got?.plain.orEmpty(), unchanged = false) else n }
             } catch (e: TellyError) {
                 // Say so when there's nothing on screen yet, but keep trying while the song plays: a restart or a
                 // dropped connection mustn't leave a song without its words, or its words without their timing.

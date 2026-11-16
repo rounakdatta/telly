@@ -308,11 +308,13 @@ class PublicApp(Base):
                 log.exception('cover for %s', song.get('id'))
         if self.genius and song.get('title'):
             try:
-                got['trivia'] = self.genius.trivia(song['title'], song.get('artist') or '', got['lines'])
+                # Untimed words carry notes too: they're placed on the words, whatever their timing.
+                on = got['lines'] or [{'text': t} for t in got.get('plain') or []]
+                got['trivia'] = self.genius.trivia(song['title'], song.get('artist') or '', on)
             except Exception:
                 log.exception('genius notes for %s', song.get('id'))
         if known and got.get('version') == known:
-            got = dict(got, lines=[], unchanged=True)
+            got = dict(got, lines=[], plain=[], unchanged=True)
         return got
 
     def library(self, m, q, body):

@@ -221,7 +221,7 @@ fun LyricsScreen(
                 when {
                     playing == null -> NothingPlaying(suggestion, onOpenUrl)
                     shown.isNotEmpty() -> Lines(shown, lyrics, active, { pos.longValue }, onOpenUrl)
-                    else -> Unsung(lyrics, error, note, onRetry)
+                    else -> Unsung(lyrics, error, note, onRetry, onOpenUrl)
                 }
             }
             if (playing != null) Progress(playing, { pos.longValue }, onOpenPlayer)
@@ -265,9 +265,13 @@ private fun NothingPlaying(suggestion: Pair<String, String>?, onOpenUrl: (String
  * what there is to say about it, which is most of the point for an instrumental.
  */
 @Composable
-private fun Unsung(l: LyricsResult?, error: String?, note: String?, onRetry: () -> Unit) {
+private fun Unsung(l: LyricsResult?, error: String?, note: String?, onRetry: () -> Unit, onOpenUrl: (String) -> Unit) {
+    val says = l?.trivia?.about.orEmpty().ifEmpty { listOfNotNull(note) }
+    if (error == null && l != null && l.kind == "plain" && l.plain.any { it.isNotBlank() }) {
+        PlainLines(l, says, onOpenUrl)
+        return
+    }
     Column(Modifier.fillMaxSize().padding(horizontal = 24.dp, vertical = 20.dp)) {
-        val says = listOfNotNull(note) + l?.trivia?.about.orEmpty()
         when {
             error != null -> {
                 Text(error, style = T.body, color = C.text2)
@@ -357,6 +361,34 @@ private fun Lines(shown: List<Shown>, l: LyricsResult?, active: Int, pos: () -> 
     }
 }
 
+private val PLAIN = TextStyle(fontFamily = Inter, fontWeight = FontWeight.SemiBold, fontSize = 22.sp, lineHeight = 30.sp, letterSpacing = (-0.3).sp)
+
+/**
+ * Words without times (none were found timed to this recording): the song's words, set to be read rather than sung
+ * along to, with what's said about it first and Genius's notes beside the passages they're about. Nothing sweeps:
+ * there is no timing to drive it, and a guessed one would mislead.
+ */
+@Composable
+private fun PlainLines(l: LyricsResult, says: List<String>, onOpenUrl: (String) -> Unit) {
+    val notes = l.trivia?.lines.orEmpty()
+    val spans = notes.map { it.line..maxOf(it.line, it.end ?: it.line) }
+    val gapPx = with(LocalDensity.current) { 10.dp.toPx() }
+    LazyColumn(
+        Modifier.fillMaxSize(), contentPadding = PaddingValues(start = 24.dp, end = 30.dp, top = 8.dp, bottom = 48.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        says.forEachIndexed { i, s -> item(key = "say$i") { Box(Modifier.padding(bottom = 8.dp)) { Said(s, bright = true) } } }
+        itemsIndexed(l.plain, key = { i, _ -> "p$i" }) { i, line ->
+            val k = spans.indexOfFirst { i in it }
+            Column(Modifier.fillMaxWidth().then(if (k >= 0) Modifier.passageRule(0, i == spans[k].first, i == spans[k].last, gapPx) else Modifier)) {
+                if (line.isBlank()) Spacer(Modifier.height(8.dp)) else Text(line, style = PLAIN, color = C.text.copy(alpha = 0.88f))
+                if (k >= 0 && i == spans[k].last) Whispered(notes[k].text, bright = true)
+            }
+        }
+        item(key = "credits") { Credits(l, onOpenUrl) }
+    }
+}
+
 private val LYRIC = TextStyle(fontFamily = Inter, fontWeight = FontWeight.ExtraBold, fontSize = 30.sp, lineHeight = 38.sp, letterSpacing = (-0.6).sp)
 
 /**
@@ -433,8 +465,15 @@ private fun Modifier.passageRule(state: Int, first: Boolean, last: Boolean, gapP
 @Composable
 private fun Credits(l: LyricsResult?, onOpenUrl: (String) -> Unit) {
     val url = l?.trivia?.takeIf { it.status == "ready" && (it.lines.isNotEmpty() || it.about.isNotEmpty()) }?.url
+    val from = when (l?.source) {
+        "lrc.red" -> "lrc.red"
+        "megalobiz" -> "Megalobiz"
+        "simpmusic" -> "SimpMusic's listeners"
+        else -> "LRCLIB"
+    }
     Column(Modifier.padding(top = 28.dp)) {
-        Text("Words from LRCLIB, timed to this recording by LeZeppLean.", style = T.small, color = C.text3)
+        Text(if (l?.kind == "plain") "Words from $from, not timed to this recording yet." else "Words from $from, timed to this recording by LeZeppLean.",
+            style = T.small, color = C.text3)
         if (url != null) {
             Text("Notes from Genius annotations · Read them there", style = T.small, color = C.text3,
                 modifier = Modifier.padding(top = 4.dp).clip(RoundedCornerShape(6.dp)).clickable(role = Role.Button, onClickLabel = "Open on Genius") { onOpenUrl(url) }
