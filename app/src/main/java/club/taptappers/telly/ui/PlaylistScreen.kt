@@ -114,7 +114,7 @@ private fun TopBar(title: String, scrolled: Boolean, haze: HazeState, actions: P
         }
         Box(Modifier.align(Alignment.CenterEnd)) {
             GlassCircle(R.drawable.ic_more, "More", { menu = true })
-            DropdownMenu(expanded = menu, onDismissRequest = { menu = false }, containerColor = C.sheet) {
+            DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                 DropdownMenuItem(text = { Text("Save to the services again", style = T.body, color = C.text) },
                     onClick = { menu = false; actions.onResync() })
                 DropdownMenuItem(text = { Text("Delete this playlist", style = T.body, color = C.text2) },

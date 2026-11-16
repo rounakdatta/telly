@@ -159,7 +159,7 @@ private fun Field(label: String, value: String, onValue: (String) -> Unit, type:
         Row(verticalAlignment = Alignment.CenterVertically) {
             BasicTextField(
                 value = value, onValueChange = onValue, singleLine = true, textStyle = T.body.copy(color = C.text),
-                cursorBrush = SolidColor(C.text), keyboardOptions = KeyboardOptions(keyboardType = type, autoCorrectEnabled = false),
+                cursorBrush = SolidColor(C.text), keyboardOptions = KeyboardOptions(keyboardType = type),
                 visualTransformation = if (secret) PasswordVisualTransformation() else VisualTransformation.None,
                 modifier = Modifier.weight(1f).padding(top = 4.dp),
             )
