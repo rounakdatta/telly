@@ -52,7 +52,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
-import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.platform.LocalDensity
@@ -425,7 +424,8 @@ private fun Modifier.passageRule(state: Int, first: Boolean, last: Boolean, gapP
         val w = 2.5.dp.toPx()
         val top = if (first) 6.dp.toPx() else 0f
         val bottom = size.height - (if (last) 4.dp.toPx() else 0f) + (if (last) 0f else gapPx)
-        drawRoundRect(Whisper.copy(alpha = alpha), topLeft = Offset(-14.dp.toPx(), top), size = Size(w, bottom - top), cornerRadius = CornerRadius(w / 2))
+        // Square ends: rounded ones left a notch where two rows of a passage meet (a 2.5 dp rule needs no rounding).
+        drawRect(Whisper.copy(alpha = alpha), topLeft = Offset(-14.dp.toPx(), top), size = Size(w, bottom - top))
     }
 }
 
