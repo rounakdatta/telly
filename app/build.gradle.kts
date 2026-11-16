@@ -2,8 +2,8 @@ plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
-    alias(libs.plugins.hilt)
-    alias(libs.plugins.ksp)
+    alias(libs.plugins.kotlin.serialization)
+    alias(libs.plugins.roborazzi)
 }
 
 android {
@@ -14,35 +14,33 @@ android {
         applicationId = "club.taptappers.telly"
         minSdk = 29
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0"
-
-        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        // 2.x is the playlist canvas; 1.x was the tale runner (git tag tales-final). Same id and signing key, so the
+        // new app installs over the old one.
+        versionCode = 200
+        versionName = "2.0.0"
     }
 
-    // Pin the debug signing config to a keystore checked into the repo so
-    // every build (local + CI) produces an APK signed with the same cert.
-    // Without this, GitHub Actions generates a fresh debug.keystore per run
-    // and Android refuses to update across signatures, forcing a full
-    // uninstall (= losing all tales + tokens) for every release. The
-    // credentials below are Android's well-known debug defaults — not
-    // sensitive, identical to what Android Studio generates locally.
+    // Releases are signed with telly's own key, kept only in GitHub's encrypted secrets (backed up in Bitwarden as
+    // telly/android_release_keystore). It used to be the debug key checked into this public repo, which meant anyone
+    // could sign an "update" that installs over telly and reads its token. Debug builds (CI screenshots) use the
+    // throwaway key the build tools generate.
+    val releaseKeystore = System.getenv("TELLY_KEYSTORE")
     signingConfigs {
-        getByName("debug") {
-            storeFile = file("debug.keystore")
-            storePassword = "android"
-            keyAlias = "androiddebugkey"
-            keyPassword = "android"
+        if (releaseKeystore != null) {
+            create("release") {
+                storeFile = file(releaseKeystore)
+                storePassword = System.getenv("TELLY_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("TELLY_KEY_ALIAS")
+                keyPassword = System.getenv("TELLY_KEYSTORE_PASSWORD")
+            }
         }
     }
 
     buildTypes {
         release {
             isMinifyEnabled = false
-            proguardFiles(
-                getDefaultProguardFile("proguard-android-optimize.txt"),
-                "proguard-rules.pro"
-            )
+            if (releaseKeystore != null) signingConfig = signingConfigs.getByName("release")
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
     }
 
@@ -59,14 +57,15 @@ android {
         compose = true
     }
 
+    testOptions {
+        unitTests {
+            isIncludeAndroidResources = true
+        }
+    }
+
     packaging {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
-            excludes += "META-INF/DEPENDENCIES"
-            excludes += "META-INF/LICENSE"
-            excludes += "META-INF/LICENSE.txt"
-            excludes += "META-INF/NOTICE"
-            excludes += "META-INF/NOTICE.txt"
         }
     }
 }
@@ -74,42 +73,32 @@ android {
 dependencies {
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
+    implementation(libs.androidx.lifecycle.runtime.compose)
     implementation(libs.androidx.lifecycle.viewmodel.compose)
     implementation(libs.androidx.activity.compose)
 
-    // Compose
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.ui)
     implementation(libs.androidx.ui.graphics)
-    implementation(libs.androidx.ui.tooling.preview)
+    implementation(libs.androidx.foundation)
     implementation(libs.androidx.material3)
-    implementation(libs.androidx.navigation.compose)
-
-    // Room
-    implementation(libs.androidx.room.runtime)
-    implementation(libs.androidx.room.ktx)
-    ksp(libs.androidx.room.compiler)
-
-    // Hilt
-    implementation(libs.hilt.android)
-    ksp(libs.hilt.compiler)
-    implementation(libs.hilt.navigation.compose)
-
-    // OkHttp
-    implementation(libs.okhttp)
-
-    // Encrypted storage for OAuth secrets/tokens
-    implementation(libs.androidx.security.crypto)
-
-    // Health Connect
-    implementation(libs.androidx.health.connect.client)
-
-    // Google/Gmail
-    implementation(libs.play.services.auth)
-    implementation(libs.google.api.client.android)
-    implementation(libs.google.api.services.gmail)
-    implementation(libs.kotlinx.coroutines.play.services)
-
-    // Debug
+    implementation(libs.androidx.ui.tooling.preview)
     debugImplementation(libs.androidx.ui.tooling)
+    debugImplementation(libs.androidx.ui.test.manifest)
+
+    implementation(libs.kotlinx.serialization.json)
+    implementation(libs.okhttp)
+    implementation(libs.coil.compose)
+    implementation(libs.coil.network.okhttp)
+    implementation(libs.haze)
+
+    testImplementation(libs.junit)
+    testImplementation(libs.androidx.test.core)
+    testImplementation(libs.androidx.test.ext.junit)
+    testImplementation(libs.robolectric)
+    testImplementation(libs.roborazzi)
+    testImplementation(libs.roborazzi.compose)
+    testImplementation(libs.roborazzi.junit.rule)
+    testImplementation(platform(libs.androidx.compose.bom))
+    testImplementation(libs.androidx.ui.test.junit4)
 }
