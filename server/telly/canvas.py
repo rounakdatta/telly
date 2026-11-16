@@ -73,7 +73,7 @@ class Canvas:
         v = v or self.store.version(s['id'])
         b, tracks = v['brief'], v['tracks']
         cache = self.store.resolved([t['id'] for t in tracks])
-        notes = self.store.notes_for([t['id'] for t in tracks])
+        notes = {k: v for k, v in self.store.notes_for([t['id'] for t in tracks]).items() if v}
         rows = []
         for i, t in enumerate(tracks):
             r = cache.get(t['id']) or {}
@@ -92,7 +92,7 @@ class Canvas:
             'summary': E.summary(b, tracks), 'blurb': E.ACTIVITIES[b['activity']]['blurb'],
             'brief': dict({k: b.get(k) for k in ('familiar', 'energy', 'worlds', 'origins', 'include_artists', 'exclude_artists')},
                           instrumental=E.is_instrumental(b)),
-            'notes_state': s.get('notes_state') or 'pending',
+            'notes_state': s.get('notes_state') or 'none',
             'tracks': rows, 'version': v['n'], 'can_undo': bool(v.get('parent')), 'created': s['created'], 'updated': s['updated'],
             'ytm': {'state': s.get('ytm_state') or 'pending', 'url': ytm_url(s['ytm_id']) if s.get('ytm_id') else None,
                     'play': (f"https://music.youtube.com/watch?v={rows[0]['ytm']}&list={s['ytm_id']}" if s.get('ytm_id') and rows and rows[0]['ytm']
@@ -135,8 +135,8 @@ class Canvas:
             actions, tw = interpret.fallback(text, self.place, focus_brief)
             rough = True
             if tw and focus:
-                self.tweak(focus, tw, said=text)
-                return {'reply': E.TWEAK_REPLY[tw], 'focus': focus, 'day': self.day(day), 'rough': True}
+                done = self.tweak(focus, tw, said=text)  # its reply carries the build's own notes ("only 9 fit")
+                return {'reply': done['note'], 'focus': focus, 'day': self.day(day), 'rough': True}
             if not actions:
                 return {'reply': "I can't read that right now (the language model is unreachable). The buttons still work.",
                         'focus': focus, 'day': self.day(day), 'rough': True}
@@ -156,6 +156,8 @@ class Canvas:
                     continue
                 if sid:
                     last = sid
+                elif a.get('delete') and a.get('target') == last:
+                    last = None  # the playlist he was looking at is gone: there is nothing to point him back to
                 if a.get('reply'):
                     replies.append(a['reply'].strip())
         return {'reply': ' '.join(replies) or say or "I couldn't turn that into a change.", 'focus': last,
@@ -227,7 +229,7 @@ class Canvas:
             key = name if name != 'instrumental' or E.is_instrumental(b) else 'vocals'
             reply = ' '.join([E.TWEAK_REPLY[key]] + bl.notes)
             self._save(sid, 'tweak', said or E.TWEAKS[name], reply, b, tracks)
-        return self.session(sid)
+        return dict(self.session(sid), note=reply)
 
     def edit(self, sid, op, index, to=None, track_id=None):
         with self.lock:
@@ -280,7 +282,8 @@ class Canvas:
             return None
         self.store.update_session(sid, **{k: 'pending' for k in ('ytm_state', 'sp_state') if s.get(k) not in (None, 'off')})
         self.store.enqueue(sid)
-        return self.session(sid)
+        # A resync makes no version, so the last change's reply would be stale: say what this one does instead.
+        return dict(self.session(sid), note='Saving it to your music apps again.')
 
     # -- the day's lens -------------------------------------------------------------------------------------------------
     def set_lens(self, day, text):

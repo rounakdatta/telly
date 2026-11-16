@@ -107,7 +107,8 @@ fun App(model: TellyModel) {
                 is Screen.Playlist -> {
                     val s = st.sessions[screen.id]
                     if (s != null) {
-                        PlaylistScreen(s, st.working, updating = st.updating == s.id, fresh = st.fresh[s.id].orEmpty(), haze = haze,
+                        // While a message is being read the chips rest too: a tap would be dropped, so it shouldn't look tappable.
+                        PlaylistScreen(s, st.working ?: "message".takeIf { st.sending }, updating = st.updating == s.id, fresh = st.fresh[s.id].orEmpty(), haze = haze,
                             actions = PlaylistActions(
                                 onBack = model::back, onOpenUrl = openUrl,
                                 onTweak = { key, label -> model.tweak(s.id, key, label) }, onUndo = { model.undo(s.id) },

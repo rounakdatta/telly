@@ -8,6 +8,7 @@ import json
 import re
 import time
 import urllib.parse
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
 from .story import UA, _get, _plain, is_disambiguation, relevant  # noqa: F401  (UA kept for callers)
@@ -27,25 +28,37 @@ TOOL = {
 FILM = re.compile(r'[\(\[]\s*From\s+["“]?([^"”\)\]]+)["”]?\s*[\)\]]', re.I)
 
 
+class Unreachable(Exception):
+    """Wikipedia couldn't be asked (a timeout, a 429): unlike "no article", this must not be remembered."""
+
+
 def intro(query):
-    """Top Wikipedia hit's opening, in one request -> (title, extract) or None."""
+    """Top Wikipedia hit's opening, in one request -> (title, extract), or None when there is none worth having."""
     try:
-        d = _get('https://en.wikipedia.org/w/api.php?' + urllib.parse.urlencode(
-            {'action': 'query', 'generator': 'search', 'gsrsearch': query, 'gsrlimit': 1, 'prop': 'extracts',
-             'exintro': 1, 'explaintext': 1, 'redirects': 1, 'format': 'json'}))
-        pages = list((d.get('query') or {}).get('pages', {}).values())
-        if not pages:
-            return None
-        ex = re.sub(r'\n{2,}', '\n', (pages[0].get('extract') or '').strip())
-        hit = (pages[0]['title'], ex[:900])
-        return hit if len(ex) > 120 and not is_disambiguation(hit) else None
-    except Exception:
+        with urllib.request.urlopen(urllib.request.Request('https://en.wikipedia.org/w/api.php?' + urllib.parse.urlencode(
+                {'action': 'query', 'generator': 'search', 'gsrsearch': query, 'gsrlimit': 1, 'prop': 'extracts',
+                 'exintro': 1, 'explaintext': 1, 'redirects': 1, 'format': 'json'}), headers=UA), timeout=8) as r:
+            d = json.loads(r.read())
+    except Exception as e:
+        raise Unreachable(str(e)) from None
+    pages = list((d.get('query') or {}).get('pages', {}).values())
+    if not pages:
         return None
+    ex = re.sub(r'\n{2,}', '\n', (pages[0].get('extract') or '').strip())
+    hit = (pages[0]['title'], ex[:900])
+    return hit if len(ex) > 120 and not is_disambiguation(hit) else None
+
+
+def _names(name, text):
+    """Is `name` in `text` as whole words? ('Dil' must not match 'Dilbert'.)"""
+    n = _plain(name)
+    return bool(n) and f' {n} ' in f' {_plain(text)} '
 
 
 def snippet(store, t):
     """The best opening for a song: its own article, else its film's (Indian film songs rarely have one of their own),
-    else its artist's. Looked up once and cached."""
+    else its artist's, each labelled for what it is about, so a fact about the singer is never told as one about the
+    song. Looked up once and cached; a lookup that failed is not cached, and raises Unreachable."""
     film = FILM.search(t['title'] or '')
     plan = [(f"{t['title']} {t['artist']} song", 'song')]
     if film:
@@ -54,20 +67,26 @@ def snippet(store, t):
     for q, kind in plan:
         hit = store.wiki_get(q)
         if hit is None:
-            hit = intro(q)
+            hit = intro(q)  # Unreachable propagates: the caller stops asking for this pass
             store.wiki_put(q, hit)
             time.sleep(0.2)
         if not hit:
             continue
-        ok = relevant(t, hit) if kind != 'film' else _plain(film.group(1)) in _plain(hit[0])
-        if ok:
-            return kind, hit
+        title = re.sub(r'[\(\[].*?[\)\]]', '', t['title'] or '')
+        if kind == 'song' and (_names(title, hit[0]) or _names(title, hit[1][:400])):
+            return 'song', hit
+        if kind == 'film' and _names(film.group(1), hit[0]):
+            return 'film', hit
+        if kind in ('song', 'artist') and (_names(t['artist'], hit[0]) or _names(t['artist'], hit[1][:300])):
+            return 'artist', hit
     return None
 
 
 def history(t, now):
     """What his own listening says about a song, in words the friend can use."""
     month = lambda ts: time.strftime('%B %Y', time.gmtime(ts)) if ts else None
+    if t.get('pool') == 'asked':
+        return 'you asked for it by name'
     if str(t.get('pool', '')).startswith('new'):
         return 'new to you' + (' (from an artist you play a lot)' if t.get('pool') == 'new_known' else ' (fans of artists you love play it)')
     bits = []
@@ -82,15 +101,28 @@ def history(t, now):
     return ', '.join(bits) or 'one you know'
 
 
-def write(llm, about, moment, tracks, store, now=None):
-    """Notes for these tracks -> {track_id: note}. Only songs without a fresh note are written."""
+def write(llm, about, moment, tracks, store, now=None, batch=20):
+    """Notes for these tracks -> {track_id: note}. Every song without a fresh note gets one, in batches; a song the
+    friend had nothing to say about is remembered as blank, so it isn't asked about again."""
     now = now or time.time()
-    have = store.notes_for([t['id'] for t in tracks])
-    todo = [t for t in tracks if t['id'] not in have][:24]
-    if not todo:
-        return have
-    with ThreadPoolExecutor(max_workers=4) as pool:
-        snips = list(pool.map(lambda t: snippet(store, t), todo))
+    have = store.notes_for([t['id'] for t in tracks], max_age=21 * 86400)
+    todo = [t for t in tracks if t['id'] not in have]
+    for i in range(0, len(todo), batch):
+        have.update(_write_batch(llm, about, moment, todo[i:i + batch], store, now))
+    return {k: v for k, v in have.items() if v}
+
+
+def _write_batch(llm, about, moment, todo, store, now):
+    snips, down = [], False
+    for t in todo:
+        if down:
+            snips.append(None)
+            continue
+        try:
+            snips.append(snippet(store, t))
+        except Unreachable:
+            down = True  # Wikipedia isn't answering: write from his history alone this time, and remember nothing
+            snips.append(None)
     lines = []
     for i, (t, sn) in enumerate(zip(todo, snips), 1):
         src = f'{sn[0]} article "{sn[1][0]}": {sn[1][1][:600]}' if sn else 'no article found'
@@ -108,8 +140,7 @@ Rules:
 - A fact must be stated in that song's source in so many words, or in his history. Never combine or infer: "nominated
   five times between 1977 and 1981" is not "this song nearly won". Never invent dates, numbers, chart positions,
   quotes or stories.
-- When the source is about the artist or the film rather than the song, say the fact about the artist or the film, not
-  about this song.
+- A source labelled "artist" or "film" is about the artist or the film: say its facts about them, not about this song.
 - When neither has anything worth saying, point to something to listen for in terms that can't be wrong, or leave it
   empty.
 - Talk to him as "you". Warm and a little playful; no hype words; at most one exclamation mark across all the notes.
@@ -119,7 +150,14 @@ Rules:
     got = {}
     for item in out.get('notes') or []:
         n, note = item.get('n'), ' '.join(str(item.get('note') or '').split()).strip(' "')
-        if isinstance(n, int) and 1 <= n <= len(todo) and 8 <= len(note) <= 240:
-            got[todo[n - 1]['id']] = note
+        if isinstance(n, int) and 1 <= n <= len(todo):
+            tid = todo[n - 1]['id']
+            if 8 <= len(note) <= 240:
+                got[tid] = note
+            else:
+                got.setdefault(tid, '')  # an essay or a scrap never replaces a good note for the same song
+    if not down:
+        for t in todo:
+            got.setdefault(t['id'], '')  # considered and passed over: don't ask again
     store.put_notes(got)
-    return {**have, **got}
+    return got

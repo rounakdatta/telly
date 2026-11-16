@@ -30,6 +30,10 @@ TITLE = re.compile(r'(?i)\b(instrumental|theme|bgm|score|suite|interlude|intro|o
                    r'etude|piano|flute|sitar|santoor|sarod|guitar|violin|cello|lofi|lo-fi|ambient)\b')
 
 
+class Transient(Exception):
+    """LRCLIB couldn't be asked (rate limited, timing out): that's no answer, so it is never cached."""
+
+
 def plausible(title, ins, world, plays):
     return bool(TITLE.search(title or '')) or (ins is not None and ins >= 0.35) or (world in ('night', 'sound') and (plays or 0) >= 2)
 
@@ -42,14 +46,14 @@ def lookup(title, artist, duration_ms):
                 hits = json.loads(r.read())
             break
         except urllib.error.HTTPError as e:
-            if e.code == 429:
+            if e.code == 429 or e.code >= 500:
                 time.sleep(10 * (attempt + 1))
                 continue
             return None
         except Exception:
             time.sleep(3)
     else:
-        return None
+        raise Transient(title)
     want_t, want_a = ntrack(title), nartist(artist)
     best, best_s = None, 0
     for h in hits[:20]:
@@ -86,11 +90,15 @@ def main():
             if plausible(title, ins, world, p):
                 todo.append((tbl, tid, title, artist, dur))
     print(f'{len(todo)} songs to check ({sum(1 for t in todo if f"{nartist(t[3])}|{ntrack(t[2])}" in cache)} cached)', flush=True)
-    done = 0
+    done = failed = 0
     for tbl, tid, title, artist, dur in todo:
         key = f'{nartist(artist)}|{ntrack(title)}'
         if key not in cache:
-            cache[key] = lookup(title, artist, dur)
+            try:
+                cache[key] = lookup(title, artist, dur)
+            except Transient:
+                failed += 1
+                continue  # stays as it was, and is asked again on the next run
             time.sleep(0.3)
             done += 1
             if done % 100 == 0:
@@ -99,6 +107,8 @@ def main():
         con.execute(f'UPDATE {tbl} SET vocals=? WHERE id=?', (cache[key], tid))
     json.dump(cache, open(a.cache, 'w'))
     con.commit()
+    if failed:
+        print(f'{failed} lookups failed (LRCLIB busy or unreachable); run again to fill them in')
     for tbl in ('tracks', 'candidates'):
         n0 = con.execute(f'SELECT COUNT(*) FROM {tbl} WHERE vocals=0').fetchone()[0]
         n1 = con.execute(f'SELECT COUNT(*) FROM {tbl} WHERE vocals=1').fetchone()[0]

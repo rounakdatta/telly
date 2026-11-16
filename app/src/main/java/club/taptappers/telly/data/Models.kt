@@ -38,7 +38,7 @@ data class Session(
     val ytm: Remote = Remote(),
     val spotify: Remote = Remote(),
     val story: Story = Story(),
-    @SerialName("notes_state") val notesState: String = "pending",
+    @SerialName("notes_state") val notesState: String = "none",
     val brief: Brief = Brief(),
     val weather: String? = null,
     val log: List<LogEntry> = emptyList(),

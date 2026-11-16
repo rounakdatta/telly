@@ -208,12 +208,41 @@ class NotesTest(Base):
                 n = user.count('his history:')
                 return {'notes': [{'n': i, 'note': f'Listen for the bass line in song {i}.'} for i in range(1, n + 1)] +
                         [{'n': 1, 'note': 'x' * 400}]}  # an essay, which must not survive
-        N.snippet = lambda store, t: None  # no network in tests
-        got = N.write(FakeLLM(), 'a listener', 'a walk', order, store)
-        self.assertEqual(len(order), len(got))
-        self.assertTrue(all(len(v) <= 240 for v in got.values()))
-        N.write(FakeLLM(), 'a listener', 'a walk', order, store)
+        real, N.snippet = N.snippet, lambda store, t: None  # no network in tests
+        try:
+            got = N.write(FakeLLM(), 'a listener', 'a walk', order, store)
+            self.assertEqual(len(order), len(got))
+            self.assertTrue(all(len(v) <= 240 for v in got.values()))
+            N.write(FakeLLM(), 'a listener', 'a walk', order, store)
+        finally:
+            N.snippet = real
         self.assertEqual(1, len(calls), 'notes already written are reused, not written again')
+
+    def test_long_playlists_get_every_note_and_a_wikipedia_blip_is_not_remembered(self):
+        from telly import notes as N
+        store = Store(os.path.join(self.tmp.name, 'notes2.db'))
+        tracks = [{'id': f't{i}', 'title': f'Song {i}', 'artist': 'Someone', 'pool': 'comfort', 'plays': 3} for i in range(45)]
+        calls = []
+
+        class FakeLLM:
+            def tool(self, system, user, tool, **kw):
+                calls.append(user)
+                return {'notes': [{'n': i, 'note': f'Listen for the drums in this one, number {i}.'}
+                                  for i in range(1, user.count('his history:') + 1)]}
+        asked = []
+
+        def down(q):
+            asked.append(q)
+            raise N.Unreachable('timed out')
+        real_intro, N.intro = N.intro, down
+        try:
+            got = N.write(FakeLLM(), 'a listener', 'a run', tracks, store)
+        finally:
+            N.intro = real_intro
+        self.assertEqual(45, len(got), 'every song gets a note, however long the playlist')
+        self.assertEqual(3, len(calls), 'in batches of 20')
+        self.assertEqual(3, len(asked), 'once Wikipedia fails, a batch stops asking it')
+        self.assertIsNone(store.wiki_get('Song 0 Someone song'), 'a failed lookup is not cached as "no article"')
 
     def test_history_lines_read_like_a_friend_would_say_them(self):
         from telly.notes import history

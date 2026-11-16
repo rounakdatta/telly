@@ -177,13 +177,35 @@ class TellyModel(app: Application) : AndroidViewModel(app) {
         if (d.today) prefs.saveDay(d)
     }
 
-    private fun putSession(s: Session) {
+    private suspend fun putSession(s: Session) {
+        if (_state.value.sessions[s.id] == s) return
         _state.update { st ->
-            if (st.sessions[s.id] == s) st
-            else st.copy(sessions = st.sessions + (s.id to s), day = st.day?.let { d ->
+            st.copy(sessions = st.sessions + (s.id to s), day = st.day?.let { d ->
                 if (d.sessions.any { it.id == s.id }) d.copy(sessions = d.sessions.map { if (it.id == s.id) s else it }) else d
             })
         }
+        // The canvas shown at a cold start is the cached day: keep it as fresh as what's on screen.
+        _state.value.day?.takeIf { d -> d.today && d.sessions.any { it.id == s.id } }?.let { prefs.saveDay(it) }
+    }
+
+    /** A day's playlists from a reply. Today's replaces the canvas; an earlier day's only updates its own playlists (and
+     *  its place in the library), so a change made to an old playlist shows wherever that playlist is shown. */
+    private suspend fun absorb(d: Day) {
+        if (d.today) return putDay(d)
+        _state.update { st ->
+            st.copy(sessions = d.sessions.fold(st.sessions) { m, s -> if (m[s.id] == s) m else m + (s.id to s) },
+                library = st.library.map { ld -> if (ld.day == d.day) ld.copy(sessions = d.sessions) else ld })
+        }
+    }
+
+    /** A playlist that no longer exists: off every list, and off the screen stack (back to where he came from). */
+    private suspend fun forget(id: String) {
+        _state.update { st ->
+            st.copy(sessions = st.sessions - id, stack = st.stack.filterNot { it == Screen.Playlist(id) }.ifEmpty { listOf(Screen.Today) },
+                day = st.day?.let { d -> d.copy(sessions = d.sessions.filterNot { it.id == id }) },
+                library = st.library.map { d -> d.copy(sessions = d.sessions.filterNot { it.id == id }) })
+        }
+        _state.value.day?.takeIf { it.today }?.let { prefs.saveDay(it) }
     }
 
     /** While something is still being saved or written, look again every few seconds; stop when it settles. */
@@ -216,7 +238,7 @@ class TellyModel(app: Application) : AndroidViewModel(app) {
      *  through, so the words stay in the box when it didn't. */
     fun send(text: String, onSent: (Boolean) -> Unit = {}) {
         val t = text.trim()
-        if (t.isEmpty() || _state.value.sending) return
+        if (t.isEmpty() || _state.value.sending || _state.value.working != null) return
         val focus = (_state.value.top as? Screen.Playlist)?.id
         val day = focus?.let { _state.value.sessions[it]?.day } ?: "today"
         val before = snapshot()
@@ -225,8 +247,11 @@ class TellyModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             try {
                 val r = api.prompt(t, focus, day)
-                if (r.day.today) putDay(r.day)
-                val target = r.focus ?: focus
+                absorb(r.day)
+                // "Delete this one": the playlist on screen is gone, so its page closes and there's nothing to open.
+                val gone = focus != null && r.focus == null && r.day.sessions.none { it.id == focus }
+                if (gone) forget(focus!!)
+                val target = if (gone) null else r.focus ?: focus
                 if (target != null && r.day.sessions.none { it.id == target }) putSession(api.session(target))
                 val now = target?.let { _state.value.sessions[it] }
                 val (added, removed) = diff(before[target], now)
@@ -282,7 +307,7 @@ class TellyModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             try {
                 val s = call()
-                putSession(s)
+                putSession(s.copy(note = null))
                 val (added, removed) = diff(before, s)
                 markFresh(id, before, s)
                 _state.update { st ->
@@ -301,12 +326,8 @@ class TellyModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             try {
                 api.delete(id)
-                _state.update { st ->
-                    st.copy(sessions = st.sessions - id, stack = st.stack.filterNot { it == Screen.Playlist(id) }.ifEmpty { listOf(Screen.Today) },
-                        day = st.day?.let { d -> d.copy(sessions = d.sessions.filterNot { it.id == id }) },
-                        library = st.library.map { d -> d.copy(sessions = d.sessions.filterNot { it.id == id }) },
-                        exchange = Exchange(null, Phase.DONE, "Deleted, here and on the music services."))
-                }
+                forget(id)
+                _state.update { it.copy(exchange = Exchange(null, Phase.DONE, "Deleted, here and on the music services.")) }
             } catch (e: TellyError) {
                 _state.update { it.copy(exchange = Exchange(null, Phase.FAILED, e.message ?: "Couldn't delete it.")) }
             }

@@ -60,10 +60,19 @@ class Store:
             c.executescript(SCHEMA)
             cols = {r['name'] for r in c.execute('PRAGMA table_info(versions)')}
             if 'parent' not in cols:  # databases made before undo walked back
-                c.execute('ALTER TABLE versions ADD COLUMN parent INTEGER')
+                try:
+                    c.execute('ALTER TABLE versions ADD COLUMN parent INTEGER')
+                except sqlite3.OperationalError:
+                    pass  # the other process added it first
             cols = {r['name'] for r in c.execute('PRAGMA table_info(sessions)')}
             if 'notes_state' not in cols:  # databases made before per-song notes
-                c.execute('ALTER TABLE sessions ADD COLUMN notes_state TEXT')
+                try:
+                    c.execute('ALTER TABLE sessions ADD COLUMN notes_state TEXT')
+                except sqlite3.OperationalError:
+                    pass  # the other process (api or worker) added it first
+                # Recent playlists get their notes written; older ones simply have none (never "writing" forever).
+                c.execute("UPDATE sessions SET notes_state = CASE WHEN created > ? THEN 'pending' ELSE 'none' END "
+                          "WHERE notes_state IS NULL", (time.time() - 2 * 86400,))
 
     def db(self):
         c = getattr(self.local, 'c', None)
@@ -205,13 +214,20 @@ class Store:
             c.execute('PRAGMA wal_checkpoint(TRUNCATE)')
 
     # -- per-song notes and the Wikipedia openings behind them --------------------------------------------------------
-    def notes_for(self, ids, max_age=21 * 86400):
+    def notes_for(self, ids, max_age=None):
+        """Notes by track id. `max_age` is for deciding what to write again; showing a playlist uses them all (a note
+        written a month ago still belongs to a month-old playlist). An empty note means "nothing worth saying" and
+        keeps the song from being asked about again."""
         ids = list(ids)
         if not ids:
             return {}
+        out = {}
         with self.db() as c:
-            q = f"SELECT track_id, note FROM notes WHERE created > ? AND track_id IN ({','.join('?' * len(ids))})"
-            return {r['track_id']: r['note'] for r in c.execute(q, (time.time() - max_age, *ids))}
+            for i in range(0, len(ids), 500):
+                chunk = ids[i:i + 500]
+                q = f"SELECT track_id, note FROM notes WHERE created > ? AND track_id IN ({','.join('?' * len(chunk))})"
+                out.update({r['track_id']: r['note'] for r in c.execute(q, (time.time() - max_age if max_age else 0, *chunk))})
+        return out
 
     def put_notes(self, notes):
         now = time.time()
