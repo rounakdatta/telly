@@ -257,7 +257,14 @@ class Worker(threading.Thread):
         b = v['brief']
         moment = f"{s['title']} ({b['activity']}) on {time.strftime('%A %-d %B', time.strptime(s['day'], '%Y-%m-%d'))}"
         try:
-            notes_mod.write(llm, self.canvas.about, moment, v['tracks'], self.store)
+            # One batch per turn, so a playlist waiting to sync goes first; the next batch follows while that one made
+            # progress (a turn that wrote nothing, say with Wikipedia down and the model passing, ends it).
+            left = len(notes_mod.unwritten(v['tracks'], self.store))
+            notes_mod.write(llm, self.canvas.about, moment, v['tracks'], self.store, batches=1)
+            still = len(notes_mod.unwritten(v['tracks'], self.store))
+            if still and still < left:
+                self.after.insert(0, ('notes', sid))
+                return
             self.store.update_session(sid, notes_state='ready')
         except Exception as e:
             log.warning('notes %s: %s', sid, str(e)[:200])

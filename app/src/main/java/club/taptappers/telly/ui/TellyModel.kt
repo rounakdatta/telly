@@ -179,10 +179,11 @@ class TellyModel(app: Application) : AndroidViewModel(app) {
 
     private suspend fun putSession(s: Session) {
         if (_state.value.sessions[s.id] == s) return
+        val swap = { list: List<Session> -> if (list.any { it.id == s.id }) list.map { if (it.id == s.id) s else it } else list }
         _state.update { st ->
-            st.copy(sessions = st.sessions + (s.id to s), day = st.day?.let { d ->
-                if (d.sessions.any { it.id == s.id }) d.copy(sessions = d.sessions.map { if (it.id == s.id) s else it }) else d
-            })
+            // Wherever the playlist is shown: today's canvas, and its day in the library (a change made from there).
+            st.copy(sessions = st.sessions + (s.id to s), day = st.day?.let { d -> d.copy(sessions = swap(d.sessions)) },
+                library = st.library.map { d -> d.copy(sessions = swap(d.sessions)) })
         }
         // The canvas shown at a cold start is the cached day: keep it as fresh as what's on screen.
         _state.value.day?.takeIf { d -> d.today && d.sessions.any { it.id == s.id } }?.let { prefs.saveDay(it) }
@@ -248,10 +249,11 @@ class TellyModel(app: Application) : AndroidViewModel(app) {
             try {
                 val r = api.prompt(t, focus, day)
                 absorb(r.day)
-                // "Delete this one": the playlist on screen is gone, so its page closes and there's nothing to open.
-                val gone = focus != null && r.focus == null && r.day.sessions.none { it.id == focus }
-                if (gone) forget(focus!!)
-                val target = if (gone) null else r.focus ?: focus
+                // "Delete this one" (perhaps "…and make a walk instead"): the playlist on screen is gone, so its page
+                // closes; the card offers whatever was made in its place.
+                val gone = focus != null && r.day.sessions.none { it.id == focus }
+                if (focus != null && gone) forget(focus)
+                val target = r.focus?.takeUnless { it == focus && gone } ?: focus?.takeUnless { gone }
                 if (target != null && r.day.sessions.none { it.id == target }) putSession(api.session(target))
                 val now = target?.let { _state.value.sessions[it] }
                 val (added, removed) = diff(before[target], now)

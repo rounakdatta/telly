@@ -9,9 +9,9 @@ import re
 import time
 import urllib.parse
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor
 
 from .story import UA, _get, _plain, is_disambiguation, relevant  # noqa: F401  (UA kept for callers)
+from .textnorm import ntrack
 
 TOOL = {
     'name': 'notes',
@@ -41,6 +41,8 @@ def intro(query):
             d = json.loads(r.read())
     except Exception as e:
         raise Unreachable(str(e)) from None
+    if 'error' in d:  # throttled or refused, in a 200: not an answer either
+        raise Unreachable(str(d['error'])[:200])
     pages = list((d.get('query') or {}).get('pages', {}).values())
     if not pages:
         return None
@@ -64,6 +66,8 @@ def snippet(store, t):
     if film:
         plan.append((f'{film.group(1)} film', 'film'))
     plan.append((f"{t['artist']} musician", 'artist'))
+    title = ntrack(t['title'])  # 'Kesariya (From "Brahmastra")', 'Wish You Were Here - 2011 Remaster': the song's own name
+    fallback = None
     for q, kind in plan:
         hit = store.wiki_get(q)
         if hit is None:
@@ -72,14 +76,14 @@ def snippet(store, t):
             time.sleep(0.2)
         if not hit:
             continue
-        title = re.sub(r'[\(\[].*?[\)\]]', '', t['title'] or '')
-        if kind == 'song' and (_names(title, hit[0]) or _names(title, hit[1][:400])):
+        # Only an article named for the song is the song's ("Home" in a singer's opening lines is not).
+        if kind == 'song' and _names(title, hit[0]):
             return 'song', hit
         if kind == 'film' and _names(film.group(1), hit[0]):
             return 'film', hit
-        if kind in ('song', 'artist') and (_names(t['artist'], hit[0]) or _names(t['artist'], hit[1][:300])):
-            return 'artist', hit
-    return None
+        if fallback is None and kind != 'film' and (_names(t['artist'], hit[0]) or _names(t['artist'], hit[1][:300])):
+            fallback = ('artist', hit)  # the film, when there is one, is asked first
+    return fallback
 
 
 def history(t, now):
@@ -101,28 +105,39 @@ def history(t, now):
     return ', '.join(bits) or 'one you know'
 
 
-def write(llm, about, moment, tracks, store, now=None, batch=20):
-    """Notes for these tracks -> {track_id: note}. Every song without a fresh note gets one, in batches; a song the
-    friend had nothing to say about is remembered as blank, so it isn't asked about again."""
-    now = now or time.time()
+def unwritten(tracks, store):
+    """The songs still without a note written in the last three weeks (a blank one counts: nothing worth saying)."""
     have = store.notes_for([t['id'] for t in tracks], max_age=21 * 86400)
-    todo = [t for t in tracks if t['id'] not in have]
-    for i in range(0, len(todo), batch):
-        have.update(_write_batch(llm, about, moment, todo[i:i + batch], store, now))
-    return {k: v for k, v in have.items() if v}
+    return [t for t in tracks if t['id'] not in have]
 
 
-def _write_batch(llm, about, moment, todo, store, now):
-    snips, down = [], False
+def write(llm, about, moment, tracks, store, now=None, batch=20, batches=None):
+    """Notes for these tracks -> {track_id: note}. Every song without a fresh note gets one, in batches (at most
+    `batches` of them this call: the worker writes one at a time, so a playlist waiting to sync never waits long); a
+    song the friend had nothing to say about is remembered as blank, so it isn't asked about again."""
+    now = now or time.time()
+    todo = unwritten(tracks, store)
+    for n, i in enumerate(range(0, len(todo), batch)):
+        if batches is not None and n >= batches:
+            break
+        _write_batch(llm, about, moment, todo[i:i + batch], store, now)
+    return {k: v for k, v in store.notes_for([t['id'] for t in tracks]).items() if v}
+
+
+def _snippets(store, todo):
+    """Each song's source, one lookup at a time (Wikipedia asks for that). Should it stop answering, the rest go
+    without, and nothing is remembered about them -> (snippets, down)."""
+    snips = []
     for t in todo:
-        if down:
-            snips.append(None)
-            continue
         try:
             snips.append(snippet(store, t))
         except Unreachable:
-            down = True  # Wikipedia isn't answering: write from his history alone this time, and remember nothing
-            snips.append(None)
+            return snips + [None] * (len(todo) - len(snips)), True
+    return snips, False
+
+
+def _write_batch(llm, about, moment, todo, store, now):
+    snips, down = _snippets(store, todo)
     lines = []
     for i, (t, sn) in enumerate(zip(todo, snips), 1):
         src = f'{sn[0]} article "{sn[1][0]}": {sn[1][1][:600]}' if sn else 'no article found'
@@ -147,15 +162,18 @@ Rules:
 - Vary how the notes begin. Not every note is trivia: mix in personal ones ("You've played this 45 times; first in
   March 2023") and things to listen for."""
     out = llm.tool(system, user, TOOL, max_tokens=1800, timeout=90, retries=1, wait=10)
-    got = {}
+    got, usable = {}, 0
     for item in out.get('notes') or []:
         n, note = item.get('n'), ' '.join(str(item.get('note') or '').split()).strip(' "')
         if isinstance(n, int) and 1 <= n <= len(todo):
             tid = todo[n - 1]['id']
             if 8 <= len(note) <= 240:
                 got[tid] = note
+                usable += 1
             else:
                 got.setdefault(tid, '')  # an essay or a scrap never replaces a good note for the same song
+    if not usable:  # an empty or cut-off reply: remember nothing, so these are asked about again
+        raise RuntimeError('the model wrote no usable notes')
     if not down:
         for t in todo:
             got.setdefault(t['id'], '')  # considered and passed over: don't ask again

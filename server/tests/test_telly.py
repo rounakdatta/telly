@@ -244,6 +244,38 @@ class NotesTest(Base):
         self.assertEqual(3, len(asked), 'once Wikipedia fails, a batch stops asking it')
         self.assertIsNone(store.wiki_get('Song 0 Someone song'), 'a failed lookup is not cached as "no article"')
 
+    def test_an_empty_reply_is_a_failure_not_nothing_to_say(self):
+        from telly import notes as N
+        store = Store(os.path.join(self.tmp.name, 'notes3.db'))
+        tracks = [{'id': 'e1', 'title': 'Song', 'artist': 'Someone', 'pool': 'comfort', 'plays': 3}]
+
+        class Empty:
+            def tool(self, *a, **k):
+                return {'notes': []}
+        real, N.snippet = N.snippet, lambda store, t: None
+        try:
+            with self.assertRaises(RuntimeError):
+                N.write(Empty(), 'a listener', 'a walk', tracks, store)
+        finally:
+            N.snippet = real
+        self.assertEqual(1, len(N.unwritten(tracks, store)), 'asked about again next time, not blank for weeks')
+
+    def test_a_film_song_is_told_from_its_film_and_a_remaster_is_still_the_song(self):
+        from telly import notes as N
+        store = Store(os.path.join(self.tmp.name, 'notes4.db'))
+        pages = {
+            'Kesariya (From "Brahmastra") Arijit Singh song': ('Arijit Singh', 'Arijit Singh is an Indian playback singer. ' * 5),
+            'Brahmastra film': ('Brahmāstra: Part One – Shiva', 'Brahmāstra: Part One – Shiva is a 2022 Indian fantasy film. ' * 4),
+            'Wish You Were Here - 2011 Remaster Pink Floyd song': ('Wish You Were Here (Pink Floyd song)', 'The title track of the album. ' * 8),
+        }
+        real, N.intro = N.intro, lambda q: pages.get(q)
+        try:
+            kind, hit = N.snippet(store, {'title': 'Kesariya (From "Brahmastra")', 'artist': 'Arijit Singh'})
+            self.assertEqual(('film', 'Brahmāstra: Part One – Shiva'), (kind, hit[0]), 'the singer is only the fallback')
+            self.assertEqual('song', N.snippet(store, {'title': 'Wish You Were Here - 2011 Remaster', 'artist': 'Pink Floyd'})[0])
+        finally:
+            N.intro = real
+
     def test_history_lines_read_like_a_friend_would_say_them(self):
         from telly.notes import history
         self.assertIn("you've played it 45 times", history({'pool': 'comfort', 'plays': 45, 'first_ts': NOW - 400 * DAY}, NOW))
