@@ -22,7 +22,7 @@ AVG_MS = 215_000
 WEAR = {'night': 1.6, 'rock': 1.4, 'pop': 1.2, 'indie': 1.0, 'rap': 0.85, 'edm': 1.0, 'roots': 1.0, 'hindi': 0.75, 'sound': 1.0, None: 1.0}
 ORIGIN_PRIOR = {'Hindi/Indian': 0.32, 'Bengali': 0.24, 'Punjabi': 0.2, 'Pakistani': 0.15, 'South Indian': 0.13, 'Western/other': 0.11}
 FAMILIAR_POOLS = ('comfort', 'familiar', 'forgotten', 'warm', 'asked')
-TAG = {'comfort': 'favourite', 'familiar': 'well known', 'forgotten': 'forgotten', 'warm': 'getting to know',
+TAG = {'curated': 'new', 'comfort': 'favourite', 'familiar': 'well known', 'forgotten': 'forgotten', 'warm': 'getting to know',
        'new_known': 'new', 'new_frontier': 'new artist', 'asked': 'asked for'}
 
 # Each activity: its default share of familiar songs and how that share splits, its energy arc (start, end),
@@ -89,7 +89,7 @@ ACTIVITIES = {
 }
 
 BRIEF_KEYS = ('activity', 'title', 'start', 'minutes', 'familiar', 'energy', 'tempo', 'worlds', 'origins', 'include_artists',
-              'exclude_artists', 'instrumental', 'avoid', 'seed', 'want')
+              'exclude_artists', 'instrumental', 'avoid', 'seed', 'want', 'mix')
 
 
 def dur_ms(t):
@@ -643,6 +643,8 @@ def why(t, now=None):
         return f'Getting to know it: {n} plays since {_month(t.get("first_ts"))}'
     if p == 'new_known':
         return 'New to you, from an artist you play a lot'
+    if p == 'curated':
+        return 'New to you: chosen for this mix'
     if p == 'new_frontier':
         return 'New artist: loved by fans of artists you love'
     if p == 'asked':
@@ -650,9 +652,14 @@ def why(t, now=None):
     return ''
 
 
+def is_new(t):
+    """New to him: a new song lined up for him, or one the curator brought from outside his library."""
+    return str(t.get('pool', '')).startswith('new') or t.get('pool') == 'curated'
+
+
 def summary(brief, tracks):
     """One short line about the shape: how familiar, what's new, and the arc."""
-    n_new = sum(1 for t in tracks if str(t.get('pool', '')).startswith('new'))
+    n_new = sum(1 for t in tracks if is_new(t))
     n_forgot = sum(1 for t in tracks if t.get('pool') == 'forgotten')
     e0, e1 = brief['energy']
     arc = 'builds to a long peak' if ACTIVITIES[brief['activity']].get('peak') else (

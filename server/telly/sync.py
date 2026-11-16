@@ -12,7 +12,10 @@ import threading
 import time
 import traceback
 
+from . import curate
 from . import notes as notes_mod
+from .genius import Genius
+from .genius import Unreachable as GeniusUnreachable
 from . import spotify as sp_mod
 from . import story as story_mod
 from . import ytm as ytm_mod
@@ -250,6 +253,8 @@ class Worker(threading.Thread):
         if not s or s['deleted']:
             return
         v = self.store.version(sid)
+        if v['brief'].get('mix'):
+            return self._mix_notes(sid, s, v)
         llm = self.canvas.llm
         if not llm.ready:
             self.store.update_session(sid, notes_state='none')
@@ -271,11 +276,78 @@ class Worker(threading.Thread):
             log.warning('notes %s: %s', sid, str(e)[:200])
             self.store.update_session(sid, notes_state='none')
 
+    def _mix_notes(self, sid, s, v):
+        """A curated mix's liner notes: the thread, an opening, a note per song carrying on from the last, a last line,
+        written along its songs from what Genius and Wikipedia say of each (curate.liner_notes, every fact checked).
+        Written once per set of songs: a version that only moves or pins them keeps the notes it has."""
+        key = f"mix:{sid}:{v['n']}"
+        done = False
+        try:
+            if self.store.get(key):
+                done = True
+                return
+            last = self.store.get(f'mix:{sid}')
+            if last and last.get('ids') and sorted(last['ids']) == sorted(t['id'] for t in v['tracks']):
+                self.store.put(key, dict(last, n=v['n']))  # the same songs: the same story
+                done = True
+                return
+            llm = self.canvas.curator_llm
+            if llm is None or not llm.ready:
+                return
+            self.store.update_session(sid, notes_state='writing', story_state='writing')
+            tracks = v['tracks']
+            g, sources, gdown, wdown = Genius(self.store, None), {}, False, False
+            for t in tracks:  # one look at a time (both sites ask for that); kept, so each song is read once
+                bits = []
+                if not gdown:
+                    try:
+                        p = g.page(t['title'], t['artist'])
+                        about = ' '.join(((p or {}).get('about') or '').split())
+                        if about and about != '?':
+                            bits.append(f'Genius: {about[:800]}')
+                    except Exception:
+                        gdown = True  # Genius is down (or answered nonsense): the rest go without
+                if not wdown:
+                    try:
+                        sn = notes_mod.snippet(self.store, t)
+                        if sn:
+                            what = 'the song itself' if sn[0] == 'song' else f'about the {sn[0]}, not this song'
+                            bits.append(f'Wikipedia ({what}) "{sn[1][0]}": {sn[1][1][:600]}')
+                    except Exception:
+                        wdown = True
+                sources[t['id']] = ' '.join(bits)
+            lens = self.store.lens(s['day'])
+            title = v['brief']['mix'].get('title') or s['title']
+            ln = curate.liner_notes(llm, self.canvas.about, self.canvas.moment(s['day'], v['brief'], s['title']),
+                                    v['brief']['mix'].get('said') or v.get('said') or '', lens, title, tracks, sources)
+            if self.store.version(sid)['n'] != v['n']:
+                done = True  # changed while this was written: the new version's notes are on their way
+                return
+            ln = dict(ln, ids=[t['id'] for t in tracks], n=v['n'])
+            self.store.put(key, ln)
+            self.store.put(f'mix:{sid}', ln)
+            body = '\n\n'.join(x for x in (ln.get('intro'), ln.get('outro')) if x)
+            self.store.update_session(sid, notes_state='ready', story_state='ready' if body else 'none',
+                                      story=json.dumps({'title': title, 'body': body, 'thread': ln.get('thread'), 'lens': lens, 'mix': True}) if body else None)
+            done = True
+        except Exception as e:
+            log.warning('mix notes %s: %s', sid, str(e)[:200])
+        finally:
+            if not done:  # whatever went wrong, the playlist never says "writing" for good
+                self.store.update_session(sid, notes_state='none', story_state='none')
+            elif self.store.session(sid).get('notes_state') in ('pending', 'writing'):
+                self.store.update_session(sid, notes_state='ready')
+                cur = self.store.session(sid)
+                if cur.get('story_state') in ('pending', 'writing'):
+                    self.store.update_session(sid, story_state='ready' if cur.get('story') else 'none')
+
     def _story(self, sid):
         s = self.store.session(sid)
         if not s or s['deleted']:
             return
         v = self.store.version(sid)
+        if v['brief'].get('mix'):
+            return  # a curated mix's story is told along its songs (_mix_notes)
         ids = {t['id'] for t in v['tracks']}
         lens = self.store.lens(s['day'])
         tried = f"{lens or ''}|{'|'.join(sorted(ids))}"

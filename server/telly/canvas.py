@@ -5,6 +5,7 @@ import logging
 import threading
 import time
 
+from . import curate
 from . import engine as E
 from . import interpret
 from .context import clock
@@ -14,7 +15,7 @@ from .ytm import playlist_url as ytm_url
 log = logging.getLogger('telly')
 KEEP = ('id', 'title', 'artist', 'artist_key', 'pool', 'kind', 'world', 'origin', 'duration_ms', 'energy', 'tempo', 'danceability',
         'acousticness', 'instrumentalness', 'speechiness', 'plays', 'days_played', 'first_ts', 'last_ts', 'liked', 'ytm_vid',
-        'spotify_uri', 'playcount', 'adjacency', 'artist_aff', 'pinned', 'since', 'skip', 'sp_streams', 'sp_skips')
+        'spotify_uri', 'playcount', 'adjacency', 'artist_aff', 'pinned', 'since', 'skip', 'sp_streams', 'sp_skips', 'part', 'link', 'year', 'thumb')
 SHAPE = ('activity', 'minutes', 'familiar', 'energy', 'tempo', 'worlds', 'origins', 'include_artists', 'exclude_artists', 'instrumental',
          'want')
 
@@ -33,9 +34,43 @@ def day_label(day):
 
 
 class Canvas:
-    def __init__(self, store, catalogs, place, llm):
+    def __init__(self, store, catalogs, place, llm, curator_llm=None):
         self.store, self.catalogs, self.place, self.llm = store, catalogs, place, llm
+        self.curator_llm = curator_llm  # chooses and orders the songs (curate.py); the engine alone when there is none
         self.lock = threading.RLock()
+
+    def curator(self):
+        if self.curator_llm is None or not self.curator_llm.ready:
+            return None
+        return curate.Curator(self.curator_llm, self.cat, self.about, self.store)
+
+    def moment(self, day, brief, title):
+        """'12:39 am sleep (sleep), 12:39 am on Tuesday 17 November, at home in Bengaluru; weather 20°, clear'."""
+        when = clock(brief['start']) + ' ' if brief.get('start') else ''
+        m = f"{title} ({brief['activity']}), {when}on {time.strftime('%A %-d %B', time.strptime(day, '%Y-%m-%d'))}, at home in {self.place.name}"
+        try:
+            wx = self.place.weather(self.place.at(day, brief['start']).replace(minute=0)) if brief.get('start') else None
+        except Exception:
+            wx = None
+        return m + (f'; weather {wx}' if wx else '')
+
+    def _curate(self, sid, day, brief, text, keep=None, instruction=None, deadline=None, rename=True):
+        """The curator's mix for this brief -> (tracks, brief carrying the mix) or None (the engine then builds it).
+        `text`: his message. A mix remembers what he first asked for, and keeps its name through tweaks and edits
+        (`rename` only for a fresh pick)."""
+        cur = self.curator()
+        if cur is None:
+            return None
+        old = brief.get('mix') or {}
+        asked = old.get('said') or text
+        got = curate.mixtape(cur, brief, self.moment(day, brief, brief['title']), asked, self.store.lens(day),
+                             int((brief.get('start') or '12:00')[:2]), self._served(sid), keep, instruction,
+                             deadline=deadline or time.time() + 90)
+        if not got:
+            return None
+        tracks, mix = got
+        title = mix['title'] if rename or not old.get('title') else old['title']
+        return tracks, dict(brief, mix={'title': title, 'said': asked})
 
     @property
     def about(self):
@@ -73,14 +108,23 @@ class Canvas:
         v = v or self.store.version(s['id'])
         b, tracks = v['brief'], v['tracks']
         cache = self.store.resolved([t['id'] for t in tracks])
-        notes = {k: v for k, v in self.store.notes_for([t['id'] for t in tracks]).items() if v}
+        # A curated mix's notes are its own story, told along its songs (written in the background, per version).
+        mix = None
+        if b.get('mix'):
+            mix = self.store.get(f"mix:{s['id']}:{v['n']}")
+            if not mix:  # until this version's are written, the last notes stay on the songs still here
+                mix = self.store.get(f"mix:{s['id']}")
+        notes = (mix or {}).get('notes') or {} if b.get('mix') else \
+            {k: v for k, v in self.store.notes_for([t['id'] for t in tracks]).items() if v}
         rows = []
         for i, t in enumerate(tracks):
             r = cache.get(t['id']) or {}
             vid = r.get('ytm_vid') or t.get('ytm_vid')
-            thumb = r.get('thumb') or (f'https://i.ytimg.com/vi/{vid}/mqdefault.jpg' if vid else None)
-            rows.append({'n': i + 1, 'id': t['id'], 'title': t['title'], 'artist': t['artist'], 'pool': t.get('pool'),
-                         'tag': E.TAG.get(t.get('pool'), ''), 'why': E.why(t), 'new': str(t.get('pool', '')).startswith('new'),
+            thumb = r.get('thumb') or (f'https://i.ytimg.com/vi/{vid}/mqdefault.jpg' if vid else None) or t.get('thumb')
+            # A song from outside his library shows as new (the app knows the engine's pools by name).
+            pool = 'new_known' if t.get('pool') == 'curated' else t.get('pool')
+            rows.append({'n': i + 1, 'id': t['id'], 'title': t['title'], 'artist': t['artist'], 'pool': pool,
+                         'tag': E.TAG.get(t.get('pool'), ''), 'why': E.why(t), 'new': E.is_new(t),
                          'pinned': bool(t.get('pinned')), 'thumb': thumb, 'duration_s': round(E.dur_ms(t) / 1000), 'note': notes.get(t['id']),
                          'ytm': vid, 'spotify': t.get('spotify_uri') or r.get('sp_uri')})
         start = b.get('start')
@@ -89,7 +133,8 @@ class Canvas:
             'id': s['id'], 'day': s['day'], 'title': s['title'], 'activity': b['activity'], 'start': start,
             'start_label': clock(start) if start else None, 'minutes': b['minutes'],
             'duration_min': round(E.duration_ms(tracks) / 60000), 'count': len(tracks),
-            'summary': E.summary(b, tracks), 'blurb': E.ACTIVITIES[b['activity']]['blurb'],
+            'summary': (mix or {}).get('thread') or (f"\u201c{b['mix']['title']}\u201d. " if b.get('mix') else '') + E.summary(b, tracks),
+            'blurb': E.ACTIVITIES[b['activity']]['blurb'],
             'brief': dict({k: b.get(k) for k in ('familiar', 'energy', 'worlds', 'origins', 'include_artists', 'exclude_artists')},
                           instrumental=E.is_instrumental(b)),
             'notes_state': s.get('notes_state') or 'none',
@@ -120,6 +165,7 @@ class Canvas:
     # -- writing -------------------------------------------------------------------------------------------------------
     def prompt(self, day, text, focus=None):
         """Read a message and apply it. Returns {'reply', 'focus', 'day'}."""
+        started = time.time()
         text = (text or '').strip()[:1000]
         if not text:
             return {'reply': None, 'focus': focus, 'day': self.day(day)}
@@ -144,11 +190,14 @@ class Canvas:
         if new_lens is not None:
             got = self.set_lens(day, new_lens)
             replies.append(f"Today's subject: {got}. The stories will lean on it." if got else 'No subject for today, then.')
+        ids = {s['id'] for s, _ in canvas}
+        # The curator is slow (seconds to a minute): it works before the lock is taken, so nothing else waits on it, and
+        # within the time the phone waits for an answer (120 s), the planner's time included.
+        pre = [self._precurate(day, a, text, ids, started + 100) for a in actions]
         with self.lock:
-            ids = {s['id'] for s, _ in canvas}
-            for a in actions:
+            for a, p in zip(actions, pre):
                 try:
-                    sid = self._apply(day, a, text, ids)
+                    sid = self._apply(day, a, text, ids, p)
                 except NoCatalog:
                     raise
                 except Exception:
@@ -163,25 +212,79 @@ class Canvas:
         return {'reply': ' '.join(replies) or say or "I couldn't turn that into a change.", 'focus': last,
                 'day': self.day(day), 'rough': rough}
 
-    def _apply(self, day, a, text, ids):
-        cat = self.cat
-        target = a.get('target')
-        if target != 'new' and target not in ids:
-            target = 'new'
+    @staticmethod
+    def _target(a, ids):
+        t = a.get('target')
+        return t if t == 'new' or t in ids else 'new'
+
+    @staticmethod
+    def _fields(a):
         fields = {k: a[k] for k in ('activity', 'start', 'minutes', 'familiar', 'energy', 'tempo', 'worlds', 'origins',
                                     'include_artists', 'exclude_artists', 'instrumental', 'title', 'want') if a.get(k) is not None}
         if 'start' in fields:
             fields['start'] = _hhmm(fields['start'])
             if not fields['start']:
                 fields.pop('start')
+        return fields
+
+    def _new_brief(self, fields):
+        fields = dict(fields)
+        fields.setdefault('start', self.place.now().strftime('%H:%M'))
+        return E.normalize(fields)
+
+    @staticmethod
+    def _changed_brief(brief, fields):
+        base = dict(brief)
+        if fields.get('activity') and fields['activity'] != brief['activity']:
+            for k in ('energy', 'familiar', 'tempo', 'instrumental'):
+                base.pop(k, None)  # "make it a run" means a run's arc, not the walk's
+        return E.normalize({**base, **fields, 'seed': brief['seed']})
+
+    def _precurate(self, day, a, text, ids, deadline):
+        """The curator's mix for an action that needs one (a new moment; a curated mix reshaped or reshuffled), worked
+        out before the edit takes the lock -> {'n': version it was made from (None for new), 'got': (tracks, brief)}."""
+        try:
+            if a.get('delete') or a.get('ops') or self.curator() is None:
+                return None
+            target = self._target(a, ids)
+            fields = self._fields(a)
+            if target == 'new':
+                brief = self._new_brief(fields)
+                got = self._curate(None, day, brief, text, deadline=deadline)
+                return {'n': None, 'brief': brief, 'got': got} if got else None
+            v = self.store.version(target)
+            if not v or not v['brief'].get('mix'):
+                return None
+            brief = v['brief']
+            new_brief = self._changed_brief(brief, fields)
+            reshuffle = bool(a.get('reshuffle'))
+            if not reshuffle and not any(new_brief.get(k) != brief.get(k) for k in SHAPE):
+                return None
+            if reshuffle:
+                new_brief['seed'] = E.normalize({'activity': new_brief['activity']})['seed']
+            got = self._curate(target, day, new_brief, text, None if reshuffle else v['tracks'], instruction=text,
+                               deadline=deadline, rename=reshuffle)
+            return {'n': v['n'], 'got': got} if got else None
+        except Exception:
+            log.exception('curating ahead failed')
+            return None
+
+    def _apply(self, day, a, text, ids, pre=None):
+        cat = self.cat
+        target = self._target(a, ids)
+        fields = self._fields(a)
         if target == 'new':
             if a.get('delete'):
                 return None
-            fields.setdefault('start', self.place.now().strftime('%H:%M'))
-            brief = E.normalize(fields)
+            brief = pre['brief'] if pre and pre['n'] is None else self._new_brief(fields)
             sid = self.store.new_session(day, brief['title'])
-            order, bl = E.rebuild(cat, brief, int(brief['start'][:2]), [], self._served(sid))
-            a['reply'] = ' '.join([a.get('reply') or ''] + bl.notes).strip()
+            got = pre['got'] if pre and pre['n'] is None else None
+            if got:
+                order, brief = got
+                a['reply'] = f"Made you \u201c{brief['mix']['title']}\u201d: {len(order)} songs. The notes are on their way."
+            else:
+                order, bl = E.rebuild(cat, brief, int(brief['start'][:2]), [], self._served(sid))
+                a['reply'] = ' '.join([a.get('reply') or ''] + bl.notes).strip()
             self._save(sid, 'prompt', text, a['reply'], brief, order)
             return sid
         sid = target
@@ -192,11 +295,7 @@ class Canvas:
         brief = dict(v['brief'])
         if fields.get('title'):
             self.store.update_session(sid, title=fields['title'][:60])
-        base = dict(brief)
-        if fields.get('activity') and fields['activity'] != brief['activity']:
-            for k in ('energy', 'familiar', 'tempo', 'instrumental'):
-                base.pop(k, None)  # "make it a run" means a run's arc, not the walk's
-        new_brief = E.normalize({**base, **fields, 'seed': brief['seed']})
+        new_brief = self._changed_brief(brief, fields)
         tracks = v['tracks']
         hour = int((new_brief.get('start') or '12:00')[:2])
         notes = []
@@ -208,8 +307,12 @@ class Canvas:
         if reshuffle:
             new_brief['seed'] = E.normalize({'activity': new_brief['activity']})['seed']
         if reshuffle or any(new_brief.get(k) != brief.get(k) for k in SHAPE):
-            tracks, bl = E.rebuild(cat, new_brief, hour, tracks, self._served(sid), sticky=not reshuffle)
-            notes += bl.notes
+            got = pre['got'] if pre and pre['n'] == v['n'] and not a.get('ops') else None  # made from this very version
+            if got:
+                tracks, new_brief = got
+            else:
+                tracks, bl = E.rebuild(cat, new_brief, hour, tracks, self._served(sid), sticky=not reshuffle)
+                notes += bl.notes
         reply = ' '.join([a.get('reply') or ''] + notes).strip()
         shape = lambda ts: [(t['id'], bool(t.get('pinned'))) for t in ts]
         if shape(tracks) == shape(v['tracks']) and new_brief == {**brief, 'avoid': new_brief['avoid']}:
@@ -221,13 +324,23 @@ class Canvas:
     def tweak(self, sid, name, said=None):
         if name not in E.TWEAKS:
             raise ValueError('unknown tweak')
+        # A curated mix is asked again with the change (its name and first ask kept), before the lock is taken.
+        v0, s = self.store.version(sid), self.store.session(sid)
+        b0 = E.tweak(v0['brief'], name)
+        key = name if name != 'instrumental' or E.is_instrumental(b0) else 'vocals'
+        asked = said or ('Bring the vocals back' if key == 'vocals' else E.TWEAKS[name])
+        got = self._curate(sid, s['day'], b0, asked, None if name == 'reshuffle' else v0['tracks'], instruction=asked,
+                           deadline=time.time() + 90, rename=name == 'reshuffle') if v0['brief'].get('mix') else None
         with self.lock:
             v = self.store.version(sid)
-            b = E.tweak(v['brief'], name)
-            hour = int((b.get('start') or '12:00')[:2])
-            tracks, bl = E.rebuild(self.cat, b, hour, v['tracks'], self._served(sid), sticky=name != 'reshuffle')
-            key = name if name != 'instrumental' or E.is_instrumental(b) else 'vocals'
-            reply = ' '.join([E.TWEAK_REPLY[key]] + bl.notes)
+            if got and v['n'] == v0['n']:
+                tracks, b = got
+                reply = E.TWEAK_REPLY[key]
+            else:  # no curator, or it changed meanwhile: the engine, on the playlist as it is now
+                b = E.tweak(v['brief'], name)
+                hour = int((b.get('start') or '12:00')[:2])
+                tracks, bl = E.rebuild(self.cat, b, hour, v['tracks'], self._served(sid), sticky=name != 'reshuffle')
+                reply = ' '.join([E.TWEAK_REPLY[key]] + bl.notes)
             self._save(sid, 'tweak', said or E.TWEAKS[name], reply, b, tracks)
         return dict(self.session(sid), note=reply)
 

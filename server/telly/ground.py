@@ -5,6 +5,10 @@ became "nearly won", a critic's reading became the band's, two true facts became
 "which is how this duet came together"). Rules get paraphrased around; a reader checking one claim against one source
 doesn't. Whatever it can't find in the source is not said (the song just has less to say).
 """
+OPINIONS = """
+Opinion, mood and framing need no source ("a quiet one to close on", "soft enough to fall asleep to", "the best of
+them"); only facts do: names, dates, places, numbers, who did what, why it happened, what it is about."""
+
 TOOL = {
     'name': 'verdicts',
     'description': 'Whether each claim is fully stated in its source.',
@@ -32,13 +36,15 @@ REWRITE = {
 }
 
 
-def check(llm, pairs):
+def check(llm, pairs, limit=1500, opinions=False):
     """[(source, claim)] -> [(supported, problem)], one per pair: supported only when everything the claim says is
     stated in its source. A missing verdict counts as unsupported; a checker that can't be asked raises (nothing
     unchecked is said, or stored)."""
     if not pairs:
         return []
-    listing = '\n\n'.join(f'[{i}] Source: {" ".join(src.split())[:1500]}\n    Claim: {claim}' for i, (src, claim) in enumerate(pairs, 1))
+    if len(pairs) > 12:  # a long mix is read in parts: one long reading loses track of which claim had which source
+        return check(llm, pairs[:12], limit, opinions) + check(llm, pairs[12:], limit, opinions)
+    listing = '\n\n'.join(f'[{i}] Source: {" ".join(src.split())[:limit]}\n    Claim: {claim}' for i, (src, claim) in enumerate(pairs, 1))
     system = 'You check facts for a music app, strictly. You are given claims, each with the only text it may rely on.'
     user = f"""{listing}
 
@@ -50,7 +56,7 @@ For each claim, is everything it says stated in its source? Judge strictly. It i
 - says something about this song that the source says only about an album, a film, the artist or another song (when
   the source names this song in it, it is about this song);
 - has a number, date, ranking, quote or name that isn't in the source.
-Plain rewording, and leaving things out, are fine. Things to listen for are fine when the source describes them.
+Plain rewording, and leaving things out, are fine. Things to listen for are fine when the source describes them.{OPINIONS if opinions else ''}
 When a claim isn't supported, say in a few words what the source doesn't say."""
     out = llm.tool(system, user, TOOL, max_tokens=1500, timeout=90, retries=1, wait=10)
     got = [(False, 'no verdict')] * len(pairs)
@@ -72,20 +78,20 @@ def _items(xs, key='text'):
     return out
 
 
-def supported(llm, pairs):
-    return [ok for ok, _ in check(llm, pairs)]
+def supported(llm, pairs, limit=1500, opinions=False):
+    return [ok for ok, _ in check(llm, pairs, limit, opinions)]
 
 
-def settle(llm, pairs, words=26):
+def settle(llm, pairs, words=26, limit=1500, opinions=False):
     """[(source, claim)] -> the claims to say: each one checked against its source; one that says more than its source
     is rewritten once with the checker's objection in hand and checked again; whatever still isn't supported becomes ''.
     """
-    verdicts = check(llm, pairs)
+    verdicts = check(llm, pairs, limit, opinions)
     final = [claim if ok else '' for (_, claim), (ok, _) in zip(pairs, verdicts)]
     bad = [k for k, (ok, _) in enumerate(verdicts) if not ok]
     if not bad:
         return final
-    listing = '\n\n'.join(f'[{i}] Source: {" ".join(pairs[k][0].split())[:1500]}\n    Claim: {pairs[k][1]}\n    Problem: {verdicts[k][1]}'
+    listing = '\n\n'.join(f'[{i}] Source: {" ".join(pairs[k][0].split())[:limit]}\n    Claim: {pairs[k][1]}\n    Problem: {verdicts[k][1]}'
                            for i, k in enumerate(bad, 1))
     user = f"""{listing}
 
@@ -96,11 +102,11 @@ doesn't give. If the source has nothing as good to say, return it empty."""
     redo = {}
     for item in _items(out.get('rewrites')):
         n, text = item.get('n'), ' '.join(str(item.get('text') or '').split()).strip()
-        if isinstance(n, int) and 1 <= n <= len(bad) and 8 <= len(text) <= 240:
+        if isinstance(n, int) and 1 <= n <= len(bad) and 8 <= len(text) <= max(240, words * 8):
             redo[bad[n - 1]] = text
     if redo:
         keys = list(redo)
-        for k, (ok, _) in zip(keys, check(llm, [(pairs[k][0], redo[k]) for k in keys])):
+        for k, (ok, _) in zip(keys, check(llm, [(pairs[k][0], redo[k]) for k in keys], limit, opinions)):
             if ok:
                 final[k] = redo[k]
     return final
