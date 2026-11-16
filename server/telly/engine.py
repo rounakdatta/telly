@@ -89,7 +89,7 @@ ACTIVITIES = {
 }
 
 BRIEF_KEYS = ('activity', 'title', 'start', 'minutes', 'familiar', 'energy', 'tempo', 'worlds', 'origins', 'include_artists',
-              'exclude_artists', 'instrumental', 'avoid', 'seed', 'want')
+              'exclude_artists', 'instrumental', 'avoid', 'seed', 'want', 'mix')
 
 
 def dur_ms(t):

@@ -11,6 +11,7 @@ Environment:
   TELLY_LLM_URL      Anthropic-shaped gateway (default: auth2api in-cluster)
   TELLY_LLM_KEY      its key (without one telly still works: rules read messages, no stories)
   TELLY_LLM_MODEL    default claude-sonnet-5
+  TELLY_CURATOR_MODEL the model that chooses and orders songs and writes the story along them (default claude-fable-5)
   TELLY_LYRICS_URL   serve: LeZeppLean, for what's playing and its word-timed lyrics (unset: no lyrics)
   TELLY_LYRICS_TOKEN serve: its bearer token
   TELLY_GENIUS_TOKEN serve: a Genius API client token (optional: without one, Genius's public JSON is read)
@@ -51,7 +52,10 @@ def main():
     place = Place(meta.get('home_name', 'Bengaluru'), meta.get('home_lat', 12.9716), meta.get('home_lon', 77.5946), meta.get('tz_minutes', 330))
     llm = LLM(os.environ.get('TELLY_LLM_URL', 'http://auth2api.apps.svc.cluster.local:8317'), os.environ.get('TELLY_LLM_KEY', ''),
               os.environ.get('TELLY_LLM_MODEL', 'claude-sonnet-5'))
-    canvas = Canvas(store, catalogs, place, llm)
+    # The curator (choosing and ordering songs, and the story along them) runs on the model with the best ear.
+    curator_llm = LLM(os.environ.get('TELLY_LLM_URL', 'http://auth2api.apps.svc.cluster.local:8317'), os.environ.get('TELLY_LLM_KEY', ''),
+                      os.environ.get('TELLY_CURATOR_MODEL', 'claude-fable-5'))
+    canvas = Canvas(store, catalogs, place, llm, curator_llm)
     if a.role == 'serve':
         lyrics = Lyrics(os.environ.get('TELLY_LYRICS_URL', ''), os.environ.get('TELLY_LYRICS_TOKEN', ''))
         genius = Genius(store, llm, os.environ.get('TELLY_GENIUS_TOKEN', ''))

@@ -5,6 +5,7 @@ import logging
 import threading
 import time
 
+from . import curate
 from . import engine as E
 from . import interpret
 from .context import clock
@@ -14,7 +15,7 @@ from .ytm import playlist_url as ytm_url
 log = logging.getLogger('telly')
 KEEP = ('id', 'title', 'artist', 'artist_key', 'pool', 'kind', 'world', 'origin', 'duration_ms', 'energy', 'tempo', 'danceability',
         'acousticness', 'instrumentalness', 'speechiness', 'plays', 'days_played', 'first_ts', 'last_ts', 'liked', 'ytm_vid',
-        'spotify_uri', 'playcount', 'adjacency', 'artist_aff', 'pinned', 'since', 'skip', 'sp_streams', 'sp_skips')
+        'spotify_uri', 'playcount', 'adjacency', 'artist_aff', 'pinned', 'since', 'skip', 'sp_streams', 'sp_skips', 'part', 'link', 'year', 'thumb')
 SHAPE = ('activity', 'minutes', 'familiar', 'energy', 'tempo', 'worlds', 'origins', 'include_artists', 'exclude_artists', 'instrumental',
          'want')
 
@@ -33,9 +34,37 @@ def day_label(day):
 
 
 class Canvas:
-    def __init__(self, store, catalogs, place, llm):
+    def __init__(self, store, catalogs, place, llm, curator_llm=None):
         self.store, self.catalogs, self.place, self.llm = store, catalogs, place, llm
+        self.curator_llm = curator_llm  # chooses and orders the songs (curate.py); the engine alone when there is none
         self.lock = threading.RLock()
+
+    def curator(self):
+        if self.curator_llm is None or not self.curator_llm.ready:
+            return None
+        return curate.Curator(self.curator_llm, self.cat, self.about)
+
+    def moment(self, day, brief, title):
+        """'12:39 am sleep (sleep), 12:39 am on Tuesday 17 November, at home in Bengaluru; weather 20°, clear'."""
+        when = clock(brief['start']) + ' ' if brief.get('start') else ''
+        m = f"{title} ({brief['activity']}), {when}on {time.strftime('%A %-d %B', time.strptime(day, '%Y-%m-%d'))}, at home in {self.place.name}"
+        try:
+            wx = self.place.weather(self.place.at(day, brief['start']).replace(minute=0)) if brief.get('start') else None
+        except Exception:
+            wx = None
+        return m + (f'; weather {wx}' if wx else '')
+
+    def _curate(self, sid, day, brief, said, keep=None, instruction=None):
+        """The curator's mix for this brief -> (tracks, brief with the mix's name) or None (the engine then builds it)."""
+        cur = self.curator()
+        if cur is None:
+            return None
+        got = curate.mixtape(cur, brief, self.moment(day, brief, brief['title']), said, self.store.lens(day),
+                             int((brief.get('start') or '12:00')[:2]), self._served(sid), keep, instruction)
+        if not got:
+            return None
+        tracks, mix = got
+        return tracks, dict(brief, mix={'title': mix['title']})
 
     @property
     def about(self):
@@ -73,12 +102,15 @@ class Canvas:
         v = v or self.store.version(s['id'])
         b, tracks = v['brief'], v['tracks']
         cache = self.store.resolved([t['id'] for t in tracks])
-        notes = {k: v for k, v in self.store.notes_for([t['id'] for t in tracks]).items() if v}
+        # A curated mix's notes are its own story, told along its songs (written in the background, per version).
+        mix = self.store.get(f"mix:{s['id']}:{v['n']}") if b.get('mix') else None
+        notes = (mix or {}).get('notes') or {} if b.get('mix') else \
+            {k: v for k, v in self.store.notes_for([t['id'] for t in tracks]).items() if v}
         rows = []
         for i, t in enumerate(tracks):
             r = cache.get(t['id']) or {}
             vid = r.get('ytm_vid') or t.get('ytm_vid')
-            thumb = r.get('thumb') or (f'https://i.ytimg.com/vi/{vid}/mqdefault.jpg' if vid else None)
+            thumb = r.get('thumb') or (f'https://i.ytimg.com/vi/{vid}/mqdefault.jpg' if vid else None) or t.get('thumb')
             rows.append({'n': i + 1, 'id': t['id'], 'title': t['title'], 'artist': t['artist'], 'pool': t.get('pool'),
                          'tag': E.TAG.get(t.get('pool'), ''), 'why': E.why(t), 'new': str(t.get('pool', '')).startswith('new'),
                          'pinned': bool(t.get('pinned')), 'thumb': thumb, 'duration_s': round(E.dur_ms(t) / 1000), 'note': notes.get(t['id']),
@@ -89,7 +121,8 @@ class Canvas:
             'id': s['id'], 'day': s['day'], 'title': s['title'], 'activity': b['activity'], 'start': start,
             'start_label': clock(start) if start else None, 'minutes': b['minutes'],
             'duration_min': round(E.duration_ms(tracks) / 60000), 'count': len(tracks),
-            'summary': E.summary(b, tracks), 'blurb': E.ACTIVITIES[b['activity']]['blurb'],
+            'summary': (mix or {}).get('thread') or (f"\u201c{b['mix']['title']}\u201d. " if b.get('mix') else '') + E.summary(b, tracks),
+            'blurb': E.ACTIVITIES[b['activity']]['blurb'],
             'brief': dict({k: b.get(k) for k in ('familiar', 'energy', 'worlds', 'origins', 'include_artists', 'exclude_artists')},
                           instrumental=E.is_instrumental(b)),
             'notes_state': s.get('notes_state') or 'none',
@@ -180,8 +213,13 @@ class Canvas:
             fields.setdefault('start', self.place.now().strftime('%H:%M'))
             brief = E.normalize(fields)
             sid = self.store.new_session(day, brief['title'])
-            order, bl = E.rebuild(cat, brief, int(brief['start'][:2]), [], self._served(sid))
-            a['reply'] = ' '.join([a.get('reply') or ''] + bl.notes).strip()
+            got = self._curate(sid, day, brief, text)
+            if got:
+                order, brief = got
+                a['reply'] = f"Made you \u201c{brief['mix']['title']}\u201d: {len(order)} songs. The notes are on their way."
+            else:
+                order, bl = E.rebuild(cat, brief, int(brief['start'][:2]), [], self._served(sid))
+                a['reply'] = ' '.join([a.get('reply') or ''] + bl.notes).strip()
             self._save(sid, 'prompt', text, a['reply'], brief, order)
             return sid
         sid = target
@@ -208,8 +246,12 @@ class Canvas:
         if reshuffle:
             new_brief['seed'] = E.normalize({'activity': new_brief['activity']})['seed']
         if reshuffle or any(new_brief.get(k) != brief.get(k) for k in SHAPE):
-            tracks, bl = E.rebuild(cat, new_brief, hour, tracks, self._served(sid), sticky=not reshuffle)
-            notes += bl.notes
+            got = self._curate(sid, day, new_brief, v.get('said') or text, None if reshuffle else tracks, text) if brief.get('mix') else None
+            if got:
+                tracks, new_brief = got
+            else:
+                tracks, bl = E.rebuild(cat, new_brief, hour, tracks, self._served(sid), sticky=not reshuffle)
+                notes += bl.notes
         reply = ' '.join([a.get('reply') or ''] + notes).strip()
         shape = lambda ts: [(t['id'], bool(t.get('pinned'))) for t in ts]
         if shape(tracks) == shape(v['tracks']) and new_brief == {**brief, 'avoid': new_brief['avoid']}:
@@ -223,11 +265,19 @@ class Canvas:
             raise ValueError('unknown tweak')
         with self.lock:
             v = self.store.version(sid)
+            s = self.store.session(sid)
             b = E.tweak(v['brief'], name)
             hour = int((b.get('start') or '12:00')[:2])
-            tracks, bl = E.rebuild(self.cat, b, hour, v['tracks'], self._served(sid), sticky=name != 'reshuffle')
             key = name if name != 'instrumental' or E.is_instrumental(b) else 'vocals'
-            reply = ' '.join([E.TWEAK_REPLY[key]] + bl.notes)
+            # A curated mix is asked again, its thread kept, with the change; the engine alone when that fails.
+            got = self._curate(sid, s['day'], b, v.get('said') or '', None if name == 'reshuffle' else v['tracks'],
+                               said or E.TWEAKS[name]) if v['brief'].get('mix') else None
+            if got:
+                tracks, b = got
+                reply = E.TWEAK_REPLY[key]
+            else:
+                tracks, bl = E.rebuild(self.cat, b, hour, v['tracks'], self._served(sid), sticky=name != 'reshuffle')
+                reply = ' '.join([E.TWEAK_REPLY[key]] + bl.notes)
             self._save(sid, 'tweak', said or E.TWEAKS[name], reply, b, tracks)
         return dict(self.session(sid), note=reply)
 
