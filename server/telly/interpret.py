@@ -94,6 +94,8 @@ Rules:
   should stay; [] clears them.
 - ops use the song numbers shown. "swap"/"not this" -> swap; "remove"/"drop" -> remove; "keep"/"love this" -> pin;
   "play X first" -> move to 1; "add <song>" -> add with its proper title and main artist.
+- instrumental: true when he wants no vocals ("instrumental", "no lyrics", "something to work to"); false brings
+  vocals back. Leave it out otherwise.
 - reshuffle: when he wants a different pick of the same kind.
 - delete: when he cancels a moment.
 - reply: one plain sentence, second person, saying what you did ("Made it mostly Bengali and dropped the rock.").

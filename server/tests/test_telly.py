@@ -35,7 +35,7 @@ def make_catalog(path, seed=1):
     con = sqlite3.connect(path)
     cols = ['id', 'title', 'artist', 'artist_key', 'spotify_uri', 'ytm_vid', 'duration_ms', 'plays', 'days_played', 'first_ts', 'last_ts',
             'sp_streams', 'sp_skips', 'liked', 'world', 'origin', 'tempo', 'energy', 'valence', 'danceability', 'acousticness',
-            'instrumentalness', 'speechiness']
+            'instrumentalness', 'speechiness', 'vocals']
     ccols = ['id', 'title', 'artist', 'artist_key', 'spotify_uri', 'duration_ms', 'world', 'origin', 'kind', 'playcount', 'monthly',
              'adjacency', 'artist_aff', 'tempo', 'energy', 'valence', 'danceability', 'acousticness', 'instrumentalness', 'speechiness']
     con.execute(f"CREATE TABLE tracks ({', '.join(cols)})")
@@ -52,7 +52,9 @@ def make_catalog(path, seed=1):
         con.execute(f"INSERT INTO tracks VALUES ({','.join('?' * len(cols))})", (
             f'{artist.lower()}|song {i}', f'Song {i}', artist, artist.lower(), f'spotify:track:{i}', f'vid{i:07d}', 200_000 + (i % 7) * 10_000,
             plays, max(1, plays // 2), NOW - 900 * DAY if kind != 3 else NOW - 20 * DAY, last, plays, 0, 0, w, ORIGIN.get(w, 'Western/other'),
-            rng.uniform(80, 170), energy, 0.5, rng.uniform(0.4, 0.9), 0.2, 0.0, 0.05))
+            rng.uniform(80, 170), energy, 0.5, rng.uniform(0.4, 0.9), 0.2,
+            0.9 if w in ('sound', 'rock') else 0.0,  # the features call rock instrumental too: they are wrong, LRCLIB isn't
+            0.05, 0 if w == 'sound' else (1 if w == 'rock' else None)))
     for i in range(150):
         w = WORLDS[i % 9]
         artist = f'New {w} {i % 30}'
@@ -144,6 +146,28 @@ class EngineTest(Base):
         self.assertNotEqual(order[1]['id'], swapped[1]['id'])
         self.assertIn(order[1]['id'], b3['avoid'])
 
+    def test_instrumental_means_no_lyrics_whatever_the_features_say(self):
+        _, order = self.build(activity='walk', minutes=40, instrumental=True)
+        self.assertTrue(order)
+        self.assertTrue(all(E.instrumental_ok(t) for t in order))
+        self.assertFalse(any(t['world'] == 'rock' for t in order), 'songs LRCLIB has lyrics for never pass, however instrumental the features say')
+
+    def test_the_instrumental_chip_toggles(self):
+        b, _ = self.build(activity='walk', minutes=30)
+        on = E.tweak(b, 'instrumental')
+        self.assertTrue(E.is_instrumental(on))
+        self.assertFalse(E.is_instrumental(E.tweak(on, 'instrumental')))
+        focus = E.normalize({'activity': 'focus'})
+        self.assertFalse(E.is_instrumental(E.tweak(focus, 'instrumental')), 'focus starts instrumental, so the first tap brings vocals')
+
+    def test_a_short_playlist_is_topped_up_and_says_so_when_it_cannot_be(self):
+        b = E.normalize({'activity': 'run', 'minutes': 600, 'instrumental': True, 'seed': 3})
+        order, bl = E.rebuild(self.cat, b, 18, [], {}, now=NOW)
+        self.assertTrue(bl.notes and 'shorter than you asked' in bl.notes[0])
+        b2 = E.normalize({'activity': 'walk', 'minutes': 60, 'origins': ['Bengali'], 'seed': 3})
+        order2, bl2 = E.rebuild(self.cat, b2, 18, [], {}, now=NOW)
+        self.assertGreaterEqual(E.duration_ms(order2), 50 * 60_000, 'a narrow filter still fills the hour when the songs exist')
+
     def test_several_pins_all_keep_their_places(self):
         b, order = self.build(activity='walk', minutes=50)
         for i in (1, 4, 6):
@@ -169,6 +193,32 @@ class EngineTest(Base):
         b2 = E.tweak(b, 'calmer')
         order2, _ = E.rebuild(self.cat, b2, 18, order, {}, now=NOW)
         self.assertEqual(order[3]['id'], order2[3]['id'])
+
+
+class NotesTest(Base):
+    def test_notes_are_written_once_per_song_and_kept_short(self):
+        from telly import notes as N
+        store = Store(os.path.join(self.tmp.name, 'notes.db'))
+        _, order = self.build(activity='walk', minutes=20)
+        calls = []
+
+        class FakeLLM:
+            def tool(self, system, user, tool, **kw):
+                calls.append(user)
+                n = user.count('his history:')
+                return {'notes': [{'n': i, 'note': f'Listen for the bass line in song {i}.'} for i in range(1, n + 1)] +
+                        [{'n': 1, 'note': 'x' * 400}]}  # an essay, which must not survive
+        N.snippet = lambda store, t: None  # no network in tests
+        got = N.write(FakeLLM(), 'a listener', 'a walk', order, store)
+        self.assertEqual(len(order), len(got))
+        self.assertTrue(all(len(v) <= 240 for v in got.values()))
+        N.write(FakeLLM(), 'a listener', 'a walk', order, store)
+        self.assertEqual(1, len(calls), 'notes already written are reused, not written again')
+
+    def test_history_lines_read_like_a_friend_would_say_them(self):
+        from telly.notes import history
+        self.assertIn("you've played it 45 times", history({'pool': 'comfort', 'plays': 45, 'first_ts': NOW - 400 * DAY}, NOW))
+        self.assertTrue(history({'pool': 'new_known'}, NOW).startswith('new to you'))
 
 
 class YtmParseTest(unittest.TestCase):

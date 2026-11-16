@@ -3,6 +3,7 @@ package club.taptappers.telly.data
 import android.content.Context
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.KSerializer
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
@@ -24,6 +25,11 @@ val json = Json { ignoreUnknownKeys = true; explicitNulls = false; coerceInputVa
 /** A failure worded for the person holding the phone, not for a log. */
 class TellyError(message: String) : Exception(message)
 
+/**
+ * The server, from the phone. Every response is read AND decoded off the main thread (a day's JSON is tens of
+ * kilobytes, and decoding it on the main thread every few seconds while something syncs was a source of jank), and
+ * every type names its serializer outright, so the release build's shrinker can't break a lookup it can't see.
+ */
 class Api(private val prefs: Prefs) {
     private val http = OkHttpClient.Builder()
         .connectTimeout(8, TimeUnit.SECONDS)
@@ -31,37 +37,41 @@ class Api(private val prefs: Prefs) {
         .build()
     private val jsonType = "application/json; charset=utf-8".toMediaType()
 
-    suspend fun day(day: String = "today"): Day = get("/api/day/$day")
-    suspend fun session(id: String): Session = get("/api/session/$id")
-    suspend fun library(before: String? = null): Library = get("/api/library" + (before?.let { "?before=$it" } ?: ""))
-    suspend fun status(): Status = get("/api/status")
+    suspend fun day(day: String = "today"): Day = get("/api/day/$day", Day.serializer())
+    suspend fun session(id: String): Session = get("/api/session/$id", Session.serializer())
+    suspend fun library(before: String? = null): Library = get("/api/library" + (before?.let { "?before=$it" } ?: ""), Library.serializer())
+    suspend fun status(): Status = get("/api/status", Status.serializer())
 
     suspend fun prompt(text: String, focus: String?, day: String = "today"): PromptResult =
-        post("/api/day/$day/prompt", buildJsonObject { put("text", text); focus?.let { put("focus", it) } })
+        post("/api/day/$day/prompt", buildJsonObject { put("text", text); focus?.let { put("focus", it) } }, PromptResult.serializer())
 
-    suspend fun setLens(text: String, day: String = "today"): Day = post("/api/day/$day/lens", buildJsonObject { put("text", text) })
+    suspend fun setLens(text: String, day: String = "today"): Day =
+        post("/api/day/$day/lens", buildJsonObject { put("text", text) }, Day.serializer())
 
-    suspend fun tweak(id: String, tweak: String): Session = post("/api/session/$id/tweak", buildJsonObject { put("tweak", tweak) })
+    suspend fun tweak(id: String, tweak: String): Session =
+        post("/api/session/$id/tweak", buildJsonObject { put("tweak", tweak) }, Session.serializer())
     suspend fun edit(id: String, op: String, index: Int, trackId: String): Session =
-        post("/api/session/$id/edit", buildJsonObject { put("op", op); put("index", index); put("id", trackId) })
-    suspend fun undo(id: String): Session = post("/api/session/$id/undo", JsonObject(emptyMap()))
-    suspend fun resync(id: String): Session = post("/api/session/$id/sync", JsonObject(emptyMap()))
+        post("/api/session/$id/edit", buildJsonObject { put("op", op); put("index", index); put("id", trackId) }, Session.serializer())
+    suspend fun undo(id: String): Session = post("/api/session/$id/undo", JsonObject(emptyMap()), Session.serializer())
+    suspend fun resync(id: String): Session = post("/api/session/$id/sync", JsonObject(emptyMap()), Session.serializer())
     suspend fun delete(id: String) {
         call { url -> Request.Builder().url(url("/api/session/$id")).delete().build() }
     }
 
-    private suspend inline fun <reified T> get(path: String): T =
-        decode(call { url -> Request.Builder().url(url(path)).get().build() })
+    private suspend fun <T> get(path: String, s: KSerializer<T>): T =
+        decode(call { url -> Request.Builder().url(url(path)).get().build() }, s)
 
-    private suspend inline fun <reified T> post(path: String, body: JsonObject): T =
-        decode(call { url -> Request.Builder().url(url(path)).post(body.toString().toRequestBody(jsonType)).build() })
+    private suspend fun <T> post(path: String, body: JsonObject, s: KSerializer<T>): T =
+        decode(call { url -> Request.Builder().url(url(path)).post(body.toString().toRequestBody(jsonType)).build() }, s)
 
-    private inline fun <reified T> decode(body: String): T = try {
-        json.decodeFromString(body)
-    } catch (e: SerializationException) {
-        throw TellyError("The server sent something this version of telly doesn't understand.")
-    } catch (e: IllegalArgumentException) {
-        throw TellyError("The server sent something this version of telly doesn't understand.")
+    private suspend fun <T> decode(body: String, s: KSerializer<T>): T = withContext(Dispatchers.Default) {
+        try {
+            json.decodeFromString(s, body)
+        } catch (e: SerializationException) {
+            throw TellyError("The server sent something this version of telly doesn't understand.")
+        } catch (e: IllegalArgumentException) {
+            throw TellyError("The server sent something this version of telly doesn't understand.")
+        }
     }
 
     /**
@@ -120,10 +130,15 @@ class Prefs(context: Context) {
 
     val configured: Boolean get() = token.isNotBlank()
 
-    /** The last day seen, so opening the app shows it at once, and still shows it offline. */
-    var cachedDay: Day?
-        get() = p.getString("day", null)?.let { runCatching { json.decodeFromString<Day>(it) }.getOrNull() }
-        set(v) = p.edit().putString("day", v?.let { json.encodeToString(Day.serializer(), it) }).apply()
+    /** The last day seen, so opening the app shows it at once, and still shows it offline. Read and written off the
+     *  main thread. */
+    suspend fun loadDay(): Day? = withContext(Dispatchers.Default) {
+        p.getString("day", null)?.let { runCatching { json.decodeFromString(Day.serializer(), it) }.getOrNull() }
+    }
+
+    suspend fun saveDay(d: Day) = withContext(Dispatchers.Default) {
+        p.edit().putString("day", json.encodeToString(Day.serializer(), d)).apply()
+    }
 
     companion object {
         const val DEFAULT_SERVER = "https://telly.taptappers.club"

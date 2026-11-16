@@ -8,6 +8,11 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.foundation.layout.padding
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
@@ -60,12 +65,15 @@ fun App(model: TellyModel) {
         }
     }
 
-    // A reply stays long enough to read, then gets out of the way.
-    LaunchedEffect(st.note?.id) {
-        if (st.note != null) {
-            delay(if (st.note!!.problem) 9000 else 6000)
-            model.clearNote()
-        }
+    // An exchange stays while telly works and while its playlist is still being saved or written about; once all of that
+    // has settled it stays long enough to read, then gets out of the way. A failure stays longer.
+    val ex = st.exchange
+    val exSession = ex?.target?.let { st.sessions[it] }
+    val settled = exSession?.inProgress == null
+    LaunchedEffect(ex?.id, ex?.phase, settled) {
+        if (ex == null || ex.phase == Phase.WORKING) return@LaunchedEffect
+        delay(if (ex.phase == Phase.FAILED) 12_000 else if (settled) 7_000 else 60_000)
+        model.dismissExchange(ex.id)
     }
 
     if (!st.configured) {
@@ -99,14 +107,15 @@ fun App(model: TellyModel) {
                 is Screen.Playlist -> {
                     val s = st.sessions[screen.id]
                     if (s != null) {
-                        PlaylistScreen(s, st.working, haze, PlaylistActions(
-                            onBack = model::back, onOpenUrl = openUrl,
-                            onTweak = { model.tweak(s.id, it) }, onUndo = { model.undo(s.id) },
-                            onSwap = { i -> s.tracks.getOrNull(i)?.let { model.swap(s.id, i, it.id) } },
-                            onRemove = { i -> s.tracks.getOrNull(i)?.let { model.remove(s.id, i, it.id) } },
-                            onPin = { i, on -> s.tracks.getOrNull(i)?.let { model.pin(s.id, i, it.id, on) } }, onResync = { model.resync(s.id) },
-                            onDelete = { model.delete(s.id) },
-                        ), bottomSpace = composerSpace)
+                        PlaylistScreen(s, st.working, updating = st.updating == s.id, fresh = st.fresh[s.id].orEmpty(), haze = haze,
+                            actions = PlaylistActions(
+                                onBack = model::back, onOpenUrl = openUrl,
+                                onTweak = { key, label -> model.tweak(s.id, key, label) }, onUndo = { model.undo(s.id) },
+                                onSwap = { i -> s.tracks.getOrNull(i)?.let { model.swap(s.id, i, it.id, it.title) } },
+                                onRemove = { i -> s.tracks.getOrNull(i)?.let { model.remove(s.id, i, it.id, it.title) } },
+                                onPin = { i, on -> s.tracks.getOrNull(i)?.let { model.pin(s.id, i, it.id, it.title, on) } },
+                                onResync = { model.resync(s.id) }, onDelete = { model.delete(s.id) },
+                            ), bottomSpace = composerSpace)
                     } else {
                         Ambient(hourTint(12))
                     }
@@ -129,9 +138,23 @@ fun App(model: TellyModel) {
                 text = draft, onText = { draft = it },
                 placeholder = if (top is Screen.Playlist) "Change this playlist…" else "What's today?",
                 sending = st.sending,
-                onSend = { val said = draft; model.send(said) { ok -> if (ok && draft == said) draft = "" } },
-                onMic = mic, haze = haze, note = st.note, onNoteTap = model::clearNote,
+                // What was sent leaves the box at once (the exchange card shows it); if it fails, it comes back.
+                onSend = { val said = draft; draft = ""; model.send(said) { ok -> if (!ok && draft.isEmpty()) draft = said } },
+                onMic = mic, haze = haze,
                 modifier = Modifier.align(Alignment.BottomCenter).navigationBarsPadding().imePadding(),
+                above = {
+                    AnimatedVisibility(visible = ex != null, enter = fadeIn(tween(180)) + slideInVertically(tween(220)) { it / 3 },
+                        exit = fadeOut(tween(220)) + slideOutVertically(tween(220)) { it / 3 }) {
+                        // Hold on to the last exchange while it animates out (a plain holder: no state write in composition).
+                        val last = remember { arrayOfNulls<Exchange>(1) }
+                        if (ex != null) last[0] = ex
+                        (ex ?: last[0])?.let { e ->
+                            ExchangeCard(e, e.target?.let { st.sessions[it] }, haze,
+                                onOpen = if (top == Screen.Today) ({ id: String -> model.dismissExchange(); model.open(Screen.Playlist(id)) }) else null,
+                                onDismiss = { model.dismissExchange(e.id) }, modifier = Modifier.padding(bottom = 10.dp))
+                        }
+                    }
+                },
             )
         }
     }

@@ -67,7 +67,8 @@ fun glassStyle() = HazeStyle(
 /**
  * The one way in: type (or speak) what the day holds, or how a playlist should change. Sits at the bottom, in
  * thumb's reach, frosted over whatever scrolls beneath it. With nothing typed the round button is a microphone;
- * with something typed it sends.
+ * with something typed it sends. What was sent leaves the box at once and shows in the exchange card above it
+ * (`above`); if it fails, it comes back to the box.
  */
 @Composable
 fun Composer(
@@ -78,9 +79,8 @@ fun Composer(
     onSend: () -> Unit,
     onMic: (() -> Unit)?,
     haze: HazeState,
-    note: Note?,
-    onNoteTap: () -> Unit,
     modifier: Modifier = Modifier,
+    above: @Composable () -> Unit = {},
 ) {
     val view = LocalView.current
     val send = {
@@ -91,26 +91,7 @@ fun Composer(
         }
     }
     Column(modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp)) {
-        AnimatedVisibility(
-            visible = note != null,
-            enter = fadeIn() + slideInVertically { it / 2 },
-            exit = fadeOut() + slideOutVertically { it / 2 },
-        ) {
-            note?.let { n ->
-                Row(
-                    Modifier.padding(start = 6.dp, end = 6.dp, bottom = 10.dp).clip(RoundedCornerShape(16.dp))
-                        .glass(haze).border(1.dp, C.hairline, RoundedCornerShape(16.dp))
-                        .clickable(onClickLabel = "Dismiss", onClick = onNoteTap).padding(horizontal = 14.dp, vertical = 10.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    if (n.problem) {
-                        Box(Modifier.size(7.dp).clip(CircleShape).background(C.problem))
-                        Spacer(Modifier.width(9.dp))
-                    }
-                    Text(n.text, style = T.caption, color = C.text)
-                }
-            }
-        }
+        above()
         Row(
             Modifier.fillMaxWidth().heightIn(min = 56.dp).clip(RoundedCornerShape(28.dp)).glass(haze)
                 .border(1.dp, C.border, RoundedCornerShape(28.dp)).padding(start = 20.dp, end = 6.dp, top = 6.dp, bottom = 6.dp),
@@ -119,8 +100,7 @@ fun Composer(
             BasicTextField(
                 value = text,
                 onValueChange = onText,
-                enabled = !sending,
-                textStyle = T.body.copy(color = if (sending) C.text2 else C.text),
+                textStyle = T.body.copy(color = C.text),
                 cursorBrush = SolidColor(C.text),
                 maxLines = 4,
                 keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences, imeAction = ImeAction.Send),

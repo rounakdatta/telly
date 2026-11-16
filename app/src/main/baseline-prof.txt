@@ -1,0 +1,4 @@
+# Ahead-of-time compile telly's own code (the libraries bring their own profiles): the first scroll and the first
+# screen change shouldn't be spent warming up.
+HSPLclub/taptappers/telly/**->**(**)**
+Lclub/taptappers/telly/**;

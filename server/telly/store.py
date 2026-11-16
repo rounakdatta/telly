@@ -17,7 +17,8 @@ CREATE TABLE IF NOT EXISTS sessions (
   deleted INTEGER NOT NULL DEFAULT 0,
   ytm_id TEXT, ytm_state TEXT, ytm_error TEXT, ytm_synced INTEGER, ytm_count INTEGER,
   sp_id TEXT, sp_state TEXT, sp_error TEXT, sp_synced INTEGER,
-  story TEXT, story_state TEXT
+  story TEXT, story_state TEXT,
+  notes_state TEXT
 );
 CREATE INDEX IF NOT EXISTS sessions_day ON sessions(day);
 CREATE TABLE IF NOT EXISTS versions (
@@ -41,6 +42,10 @@ CREATE TABLE IF NOT EXISTS resolved (
 CREATE TABLE IF NOT EXISTS served (track_id TEXT NOT NULL, ts REAL NOT NULL, session_id TEXT NOT NULL, pool TEXT);
 CREATE INDEX IF NOT EXISTS served_ts ON served(ts);
 CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT);
+-- One line per song, as an excited friend would say it (reused for three weeks, so a tweak only writes new songs').
+CREATE TABLE IF NOT EXISTS notes (track_id TEXT PRIMARY KEY, note TEXT NOT NULL, created REAL NOT NULL);
+-- Wikipedia openings looked up for songs, films and artists (kept two months).
+CREATE TABLE IF NOT EXISTS wiki (q TEXT PRIMARY KEY, title TEXT, extract TEXT, ts REAL NOT NULL);
 -- Work for the worker process: one row per session waiting to be synced (a newer request replaces an older one).
 CREATE TABLE IF NOT EXISTS jobs (session_id TEXT PRIMARY KEY, queued REAL NOT NULL);
 """
@@ -56,6 +61,9 @@ class Store:
             cols = {r['name'] for r in c.execute('PRAGMA table_info(versions)')}
             if 'parent' not in cols:  # databases made before undo walked back
                 c.execute('ALTER TABLE versions ADD COLUMN parent INTEGER')
+            cols = {r['name'] for r in c.execute('PRAGMA table_info(sessions)')}
+            if 'notes_state' not in cols:  # databases made before per-song notes
+                c.execute('ALTER TABLE sessions ADD COLUMN notes_state TEXT')
 
     def db(self):
         c = getattr(self.local, 'c', None)
@@ -182,7 +190,7 @@ class Store:
         """Sessions a restart may have interrupted mid-sync (the job is taken off the queue when work starts)."""
         with self.db() as c:
             rows = c.execute("SELECT id FROM sessions WHERE version > 0 AND (ytm_state IN ('pending','syncing') OR "
-                             "sp_state IN ('pending','syncing') OR story_state IN ('pending','writing') OR "
+                             "sp_state IN ('pending','syncing') OR story_state IN ('pending','writing') OR notes_state IN ('pending','writing') OR "
                              "(deleted=1 AND (ytm_id IS NOT NULL OR sp_id IS NOT NULL)))").fetchall()
         return [r['id'] for r in rows]
 
@@ -195,6 +203,31 @@ class Store:
             c.execute('PRAGMA wal_checkpoint(TRUNCATE)')
             c.execute('VACUUM')
             c.execute('PRAGMA wal_checkpoint(TRUNCATE)')
+
+    # -- per-song notes and the Wikipedia openings behind them --------------------------------------------------------
+    def notes_for(self, ids, max_age=21 * 86400):
+        ids = list(ids)
+        if not ids:
+            return {}
+        with self.db() as c:
+            q = f"SELECT track_id, note FROM notes WHERE created > ? AND track_id IN ({','.join('?' * len(ids))})"
+            return {r['track_id']: r['note'] for r in c.execute(q, (time.time() - max_age, *ids))}
+
+    def put_notes(self, notes):
+        now = time.time()
+        with self.db() as c:
+            c.executemany('INSERT INTO notes(track_id, note, created) VALUES(?,?,?) ON CONFLICT(track_id) DO UPDATE SET '
+                          'note=excluded.note, created=excluded.created', [(k, v, now) for k, v in notes.items()])
+
+    def wiki_get(self, q, max_age=60 * 86400):
+        with self.db() as c:
+            r = c.execute('SELECT title, extract FROM wiki WHERE q=? AND ts > ?', (q, time.time() - max_age)).fetchone()
+        return None if r is None else ((r['title'], r['extract']) if r['title'] else False)  # False = looked, found nothing
+
+    def wiki_put(self, q, hit):
+        with self.db() as c:
+            c.execute('INSERT INTO wiki(q, title, extract, ts) VALUES(?,?,?,?) ON CONFLICT(q) DO UPDATE SET title=excluded.title, '
+                      'extract=excluded.extract, ts=excluded.ts', (q, hit[0] if hit else None, hit[1] if hit else None, time.time()))
 
     # -- the day's lens: what he wants to learn about today -----------------------------------------------------------
     def lens(self, day):

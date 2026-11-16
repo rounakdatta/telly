@@ -2,12 +2,6 @@ package club.taptappers.telly.ui
 
 import android.os.Build
 import android.provider.Settings
-import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -30,7 +24,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
@@ -41,6 +34,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
@@ -74,31 +69,32 @@ fun reducedMotion(): Boolean {
 
 /**
  * The room's light: a glow in the hour's colour (or the artwork's, blurred, where the phone can blur), fading into
- * near-black. It breathes very slowly; with reduced motion it simply stays.
+ * near-black. It holds still: it used to breathe, which redrew the whole screen every frame for a barely visible
+ * effect and cost smoothness everywhere else. The artwork behind is fetched tiny (blurred, 96 px looks the same as
+ * 544) and blurred once in its own layer, so scrolling never re-blurs it.
  */
 @Composable
 fun Ambient(tint: Color, art: String? = null) {
-    val still = reducedMotion()
-    val breath by if (still) remember { mutableFloatStateOf(0.36f) } else rememberInfiniteTransition(label = "ambient").animateFloat(
-        initialValue = 0.30f, targetValue = 0.42f,
-        animationSpec = infiniteRepeatable(tween(9000, easing = FastOutSlowInEasing), RepeatMode.Reverse), label = "breath",
-    )
     Box(Modifier.fillMaxSize().background(C.bg)) {
         if (art != null && Build.VERSION.SDK_INT >= 31 && LocalEffects.current) {
             AsyncImage(
-                model = art, contentDescription = null, contentScale = ContentScale.Crop,
-                modifier = Modifier.fillMaxWidth().fillMaxHeight(0.7f).blur(80.dp).alpha(0.5f),
+                model = sized(art, 96), contentDescription = null, contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxWidth().fillMaxHeight(0.7f).graphicsLayer { alpha = 0.5f }.blur(60.dp),
             )
         }
         Canvas(Modifier.fillMaxSize()) {
-            drawRect(Brush.radialGradient(listOf(tint.copy(alpha = breath), Color.Transparent),
+            drawRect(Brush.radialGradient(listOf(tint.copy(alpha = 0.36f), Color.Transparent),
                 center = Offset(size.width * 0.12f, -size.height * 0.04f), radius = size.width * 1.25f))
-            drawRect(Brush.radialGradient(listOf(tint.copy(alpha = breath * 0.35f), Color.Transparent),
+            drawRect(Brush.radialGradient(listOf(tint.copy(alpha = 0.12f), Color.Transparent),
                 center = Offset(size.width * 1.05f, size.height * 0.5f), radius = size.width * 0.95f))
             drawRect(Brush.verticalGradient(0f to Color.Transparent, 0.5f to C.bg.copy(alpha = 0.55f), 1f to C.bg))
         }
     }
 }
+
+/** An artwork URL at the size it is shown (lh3 URLs take their size as a suffix): a 52 dp row needs ~160 px, not 544. */
+fun sized(url: String?, px: Int): String? =
+    url?.let { if ("googleusercontent.com" in it || "ggpht.com" in it) it.replace(Regex("=w\\d+-h\\d+.*$"), "=w$px-h$px-l90-rj") else it }
 
 /** A deterministic, muted two-colour tile for a song without artwork yet (same song, same colours, every time). */
 fun placeholderBrush(seed: String): Brush {
@@ -109,13 +105,20 @@ fun placeholderBrush(seed: String): Brush {
     return Brush.linearGradient(listOf(a, b))
 }
 
+/** Pixels for an artwork drawn at `size` (3x density, rounded up to a few cacheable steps). */
+private fun artPx(size: Dp): Int = when {
+    size.value <= 60f -> 180
+    size.value <= 120f -> 360
+    else -> 720
+}
+
 @Composable
 fun Art(url: String?, seed: String, size: Dp, corner: Dp, modifier: Modifier = Modifier) {
     val shape = RoundedCornerShape(corner)
     Box(modifier.size(size).clip(shape).background(placeholderBrush(seed))) {
         if (url != null) {
             AsyncImage(
-                model = ImageRequest.Builder(LocalPlatformContext.current).data(url).crossfade(220).build(),
+                model = ImageRequest.Builder(LocalPlatformContext.current).data(sized(url, artPx(size))).crossfade(220).build(),
                 contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.matchParentSize(),
             )
         }
@@ -183,21 +186,25 @@ fun GlassPill(text: String, icon: Int?, onClick: () -> Unit, modifier: Modifier 
 }
 
 @Composable
-fun Chip(text: String, onClick: () -> Unit, modifier: Modifier = Modifier, icon: Int? = null, busy: Boolean = false, enabled: Boolean = true) {
+fun Chip(text: String, onClick: () -> Unit, modifier: Modifier = Modifier, icon: Int? = null, busy: Boolean = false, enabled: Boolean = true,
+         selected: Boolean = false) {
+    val ink = if (selected) Color.Black else C.text
     Row(
-        modifier.height(38.dp).clip(RoundedCornerShape(19.dp)).background(C.glass).border(1.dp, C.hairline, RoundedCornerShape(19.dp))
+        modifier.height(38.dp).clip(RoundedCornerShape(19.dp)).background(if (selected) Color.White else C.glass)
+            .border(1.dp, if (selected) Color.White else C.hairline, RoundedCornerShape(19.dp))
+            .semantics { this.selected = selected }
             .clickable(enabled = enabled && !busy, role = Role.Button, onClick = onClick).padding(horizontal = 15.dp)
             .alpha(if (enabled || busy) 1f else 0.45f),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         if (busy) {
-            CircularProgressIndicator(Modifier.size(14.dp), color = C.text, strokeWidth = 1.6.dp)
+            CircularProgressIndicator(Modifier.size(14.dp), color = ink, strokeWidth = 1.6.dp)
             Spacer(Modifier.width(8.dp))
         } else if (icon != null) {
-            Icon(painterResource(icon), contentDescription = null, tint = C.text, modifier = Modifier.size(16.dp))
+            Icon(painterResource(icon), contentDescription = null, tint = ink, modifier = Modifier.size(16.dp))
             Spacer(Modifier.width(7.dp))
         }
-        Text(text, style = T.caption, color = C.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Text(text, style = T.caption, color = ink, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }
 
