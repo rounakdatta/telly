@@ -14,7 +14,7 @@ import urllib.request
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from telly import engine as E  # noqa: E402
-from telly.api import App, Catalogs, serve  # noqa: E402
+from telly.api import AdminApp, Catalogs, Limits, PublicApp, make_server  # noqa: E402
 from telly.canvas import Canvas  # noqa: E402
 from telly.catalog import Catalog  # noqa: E402
 from telly.context import Place  # noqa: E402
@@ -180,8 +180,15 @@ class StorySourceTest(unittest.TestCase):
         self.assertTrue(relevant({'title': 'Kun Faya Kun', 'artist': 'A.R. Rahman'}, ('Kun Faya Kun', 'Kun Faya Kun is a Sufi song from Rockstar.')))
 
 
+def start(app, slots=32):
+    """Serve on a free port (so parallel runs can't collide) and return it."""
+    httpd = make_server(app, '127.0.0.1', 0, slots)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    return httpd.server_address[1]
+
+
 class ApiTest(Base):
-    """The HTTP surface, with no language model reachable (the rules stand in)."""
+    """The public HTTP surface, with no language model reachable (the rules stand in)."""
 
     @classmethod
     def setUpClass(cls):
@@ -190,15 +197,16 @@ class ApiTest(Base):
         cats = Catalogs(cls.path)
         cls.canvas = Canvas(cls.store, cats, Place(), LLM('http://127.0.0.1:9', 'k', 'm'))
         cls.canvas.place.forecast = lambda: None  # no network in tests
-        from telly.sync import Services
-        cls.token = 'x' * 32
-        app = App(cls.token, cls.canvas, Services(cls.store), cats, cls.store)
-        threading.Thread(target=serve, args=(app, '127.0.0.1', 18793), daemon=True).start()
-        time.sleep(0.4)
+        cls.token = 'x' * 40
+        cls.limits = Limits(fails=5, window=600, budgets={'prompt': 6, 'change': 600})
+        app = PublicApp(cls.token, cls.canvas, cls.store, cats, limits=cls.limits)
+        cls.PORT = start(app)
 
-    def req(self, method, path, body=None, token=True):
-        r = urllib.request.Request(f'http://127.0.0.1:18793{path}', method=method, data=json.dumps(body).encode() if body is not None else None,
-                                   headers={'Authorization': f'Bearer {self.token}'} if token else {})
+    def req(self, method, path, body=None, token=None, raw=None, headers=None):
+        tok = self.token if token is None else token
+        data = raw if raw is not None else (json.dumps(body).encode() if body is not None else None)
+        h = dict({'Authorization': f'Bearer {tok}'} if tok else {}, **(headers or {}))
+        r = urllib.request.Request(f'http://127.0.0.1:{self.PORT}{path}', method=method, data=data, headers=h)
         try:
             with urllib.request.urlopen(r, timeout=30) as resp:
                 return resp.status, json.loads(resp.read())
@@ -206,9 +214,32 @@ class ApiTest(Base):
             return e.code, json.loads(e.read() or b'{}')
 
     def test_everything_but_livez_needs_the_token(self):
-        self.assertEqual(200, self.req('GET', '/livez', token=False)[0])
-        self.assertEqual(401, self.req('GET', '/api/day/today', token=False)[0])
-        self.assertEqual(401, self.req('PUT', '/admin/catalog', token=False)[0])
+        self.assertEqual(200, self.req('GET', '/livez', token='')[0])
+        self.assertEqual(401, self.req('GET', '/api/day/today', token='')[0])
+        self.assertEqual(401, self.req('GET', '/api/day/today', token='y' * 40)[0])
+
+    def test_admin_is_not_on_the_public_server_at_all(self):
+        self.assertEqual(404, self.req('PUT', '/admin/catalog', raw=b'x')[0])
+        self.assertEqual(404, self.req('POST', '/admin/ytm', {'cookie': 'SAPISID=x'})[0])
+
+    def test_someone_elses_guessing_never_locks_the_owner_out(self):
+        h = {'X-Real-Ip': '203.0.113.9'}
+        codes = [self.req('GET', '/api/day/today', token='z' * 40, headers=h)[0] for _ in range(8)]
+        self.assertEqual(401, codes[0])
+        self.assertEqual(429, codes[-1], 'repeated bad tokens from one address are refused')
+        self.assertEqual(200, self.req('GET', '/api/day/today', headers=h)[0], 'the real token still works from there')
+
+    def test_bodies_must_be_small_json_objects(self):
+        self.assertEqual(400, self.req('POST', '/api/day/today/prompt', raw=b'[1,2]', headers={'Content-Type': 'application/json'})[0])
+        self.assertEqual(413, self.req('POST', '/api/day/today/prompt', raw=b'{"text": "' + b'a' * 20000 + b'"}')[0])
+
+    def test_security_headers_on_every_answer(self):
+        r = urllib.request.Request(f'http://127.0.0.1:{self.PORT}/livez')
+        with urllib.request.urlopen(r, timeout=10) as resp:
+            self.assertEqual('nosniff', resp.headers['X-Content-Type-Options'])
+            self.assertEqual('no-store', resp.headers['Cache-Control'])
+            self.assertIn("default-src 'none'", resp.headers['Content-Security-Policy'])
+            self.assertEqual('telly', resp.headers['Server'])
 
     def test_a_message_makes_a_playlist_and_tweaks_change_it(self):
         code, r = self.req('POST', '/api/day/today/prompt', {'text': 'a run at 6 pm, 40 minutes'})
@@ -217,12 +248,20 @@ class ApiTest(Base):
         s = next(x for x in r['day']['sessions'] if x['id'] == r['focus'])
         self.assertEqual(('run', '18:00', 40), (s['activity'], s['start'], s['minutes']))
         self.assertGreater(s['count'], 6)
+        self.assertIsNotNone(self.store.claim(), 'the change was queued for the worker')
         code, t = self.req('POST', f"/api/session/{s['id']}/tweak", {'tweak': 'shorter'})
         self.assertEqual((200, 30), (code, t['minutes']))
         self.assertLess(t['count'], s['count'])
         code, u = self.req('POST', f"/api/session/{s['id']}/undo")
         self.assertEqual([x['id'] for x in s['tracks']], [x['id'] for x in u['tracks']])
         self.assertEqual(3, u['version'])
+
+    def test_the_language_model_budget_runs_out_politely(self):
+        lim = Limits(budgets={'prompt': 2})
+        self.assertTrue(lim.spend('prompt'))
+        self.assertTrue(lim.spend('prompt'))
+        self.assertFalse(lim.spend('prompt'))
+        self.assertTrue(lim.spend('change'), 'kinds without a budget are never refused')
 
     def test_unreadable_words_on_an_open_playlist_change_nothing(self):
         _, r = self.req('POST', '/api/day/today/prompt', {'text': 'a walk at 9 pm'})
@@ -231,10 +270,54 @@ class ApiTest(Base):
         self.assertEqual(before, len(r2['day']['sessions']))
         self.assertIn("can't read that", r2['reply'])
 
+    def test_the_days_lens(self):
+        code, d = self.req('POST', '/api/day/today/lens', {'text': '  20th-century   history '})
+        self.assertEqual((200, '20th-century history'), (code, d['lens']))
+        self.assertEqual(5, len(d['lens_ideas']))
+        self.assertEqual('20th-century history', self.req('GET', '/api/day/today')[1]['lens'])
+        self.assertIsNone(self.req('POST', '/api/day/today/lens', {'text': ''})[1]['lens'])
+
     def test_edits_are_validated(self):
         _, r = self.req('POST', '/api/day/today/prompt', {'text': 'a drive at 7 am'})
         self.assertEqual(400, self.req('POST', f"/api/session/{r['focus']}/edit", {'op': 'remove', 'index': 999})[0])
+        self.assertEqual(400, self.req('POST', f"/api/session/{r['focus']}/edit", {'op': 'remove', 'index': True})[0])
         self.assertEqual(404, self.req('GET', '/api/session/0000000000')[0])
+
+
+class AdminTest(Base):
+    def test_admin_needs_its_own_token_and_keeps_sign_ins_in_the_vault(self):
+        from telly.sync import migrate_secrets
+        from telly.vault import Vault
+        store = Store(os.path.join(self.tmp.name, 'admin.db'))
+        vault = Vault(os.path.join(self.tmp.name, 'vault', 'vault.json'))
+        store.put('ytm_cookies', {'SAPISID': 'abc'})
+        migrate_secrets(store, vault)
+        self.assertIsNone(store.get('ytm_cookies'), 'the API-readable copy is gone')
+        self.assertEqual({'SAPISID': 'abc'}, vault.get('ytm_cookies'))
+        self.assertEqual(0o600, os.stat(vault.path).st_mode & 0o777)
+
+        class FakeWorker:
+            def check_services(self):
+                return {'ytm': {'ok': False}}
+        admin = AdminApp('a' * 40, FakeWorker(), vault, Catalogs(self.path))
+        port = start(admin, slots=4)
+        for tok, want in (('x' * 40, 401), ('a' * 40, 200)):
+            r = urllib.request.Request(f'http://127.0.0.1:{port}/admin/status', headers={'Authorization': f'Bearer {tok}'})
+            try:
+                with urllib.request.urlopen(r, timeout=10) as resp:
+                    code = resp.status
+            except urllib.error.HTTPError as e:
+                code = e.code
+            self.assertEqual(want, code)
+        with self.assertRaises(SystemExit):
+            AdminApp('short', FakeWorker(), vault, Catalogs(self.path))
+
+    def test_the_queue_syncs_a_session_once_however_often_it_changed(self):
+        store = Store(os.path.join(self.tmp.name, 'queue.db'))
+        for _ in range(3):
+            store.enqueue('aaaaaaaaaa')
+        store.enqueue('bbbbbbbbbb')
+        self.assertEqual(['aaaaaaaaaa', 'bbbbbbbbbb', None], [store.claim(), store.claim(), store.claim()])
 
 
 if __name__ == '__main__':

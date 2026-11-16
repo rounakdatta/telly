@@ -133,7 +133,7 @@ fun SettingsScreen(
                 Text(if (firstRun) "Hello" else "Settings", style = T.display, color = C.text, modifier = Modifier.semantics { heading() })
                 Spacer(Modifier.height(10.dp))
                 Text(
-                    "telly lives on your homelab and answers over Tailscale. Paste its address and the token from Bitwarden (telly/token).",
+                    "telly runs on your homelab. Paste its address and the token from Bitwarden (telly/token); it stays on this phone.",
                     style = T.body, color = C.text2,
                 )
                 Spacer(Modifier.height(24.dp))

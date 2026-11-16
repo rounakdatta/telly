@@ -11,6 +11,9 @@ data class Day(
     val label: String,
     val today: Boolean = false,
     val weather: String? = null,
+    /** What he wants to learn about today; every story leans on it. */
+    val lens: String? = null,
+    @SerialName("lens_ideas") val lensIdeas: List<String> = emptyList(),
     val sessions: List<Session> = emptyList(),
 )
 

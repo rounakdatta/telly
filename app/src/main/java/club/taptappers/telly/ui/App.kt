@@ -44,6 +44,7 @@ fun App(model: TellyModel) {
         }
     }
     var draft by rememberSaveable { mutableStateOf("") }
+    var lensOpen by rememberSaveable { mutableStateOf(false) }
     val speech = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { r ->
         r.data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)?.firstOrNull()?.let { said ->
             draft = ""
@@ -91,7 +92,8 @@ fun App(model: TellyModel) {
                     TodayScreen(
                         day = st.day, loaded = st.dayLoaded, offline = st.offline, haze = haze,
                         onOpen = { model.open(Screen.Playlist(it.id)) }, onPlay = openUrl,
-                        onLibrary = { model.open(Screen.Library) }, onExample = { draft = it }, bottomSpace = composerSpace,
+                        onLibrary = { model.open(Screen.Library) }, onExample = { draft = it },
+                        onLens = { lensOpen = true }, onLensIdea = { model.setLens(it) }, bottomSpace = composerSpace,
                     )
                 }
                 is Screen.Playlist -> {
@@ -113,6 +115,10 @@ fun App(model: TellyModel) {
                 Screen.Settings -> SettingsScreen(false, model.server, model.token, st.status, st.statusLoading, st.statusError,
                     model::connect, onBack = model::back)
             }
+        }
+
+        if (lensOpen) {
+            LensSheet(st.day?.lens, st.day?.lensIdeas.orEmpty(), onSet = { model.setLens(it) }, onDismiss = { lensOpen = false })
         }
 
         val top = st.top

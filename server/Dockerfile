@@ -7,4 +7,6 @@ COPY telly /app/telly
 USER 1000
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
 EXPOSE 8080
-ENTRYPOINT ["python", "-m", "telly", "--data", "/data", "--port", "8080"]
+# The role comes from the container args: ["serve", ...] for the public API, ["worker", ...] for sync and admin.
+ENTRYPOINT ["python", "-m", "telly"]
+CMD ["serve", "--data", "/data", "--port", "8080"]

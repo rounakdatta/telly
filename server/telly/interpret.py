@@ -50,6 +50,8 @@ TOOL = {
                     'reply': {'type': 'string', 'description': 'One short plain sentence, second person, saying what you did'},
                 },
                 'required': ['target', 'reply']}},
+            'lens': {'type': 'string', 'description': "Today's subject to learn about, when he names one ('20th-century history', "
+                                                      "'something romantic', 'Indiranagar'); 'none' clears it"},
             'say': {'type': 'string', 'description': 'Only when no edit is wanted: a one-line answer'},
         },
         'required': ['actions'],
@@ -96,11 +98,14 @@ Rules:
 - delete: when he cancels a moment.
 - reply: one plain sentence, second person, saying what you did ("Made it mostly Bengali and dropped the rock.").
   No exclamation marks, no emoji, no hype.
+- lens (top level, not per playlist): when he says what he wants to learn about today ("teach me about the
+  Mughals", "something romantic today", "2000s pop culture"), set it in a few words; 'none' when he wants no subject.
+  Every playlist's story leans on it. Setting only the lens needs no actions.
 - Leave out every field you are not changing. If he asks a question rather than for a change, answer it in `say`
   with no actions."""
 
 
-def render_context(place, day, canvas, focus):
+def render_context(place, day, canvas, focus, lens=None):
     """canvas: [(session_row, version or None)]."""
     now = place.now()
     lines = [f"Now: {now.strftime('%A %-d %B %Y, %H:%M')} at home in {place.name}."]
@@ -131,12 +136,14 @@ def render_context(place, day, canvas, focus):
                     e = f", energy {t['energy']:.2f}" if t.get('energy') is not None else ''
                     pin = ', pinned' if t.get('pinned') else ''
                     lines.append(f"    {i}. {t['title']} — {t['artist']} ({TAG.get(t.get('pool'), '')}{e}{pin})")
-    lines.append(f"\nHe is looking at: {'the playlist ' + focus if focus else 'the whole canvas'}.")
+    lines.append(f"\nToday's subject to learn about: {lens or 'not chosen yet'}.")
+    lines.append(f"He is looking at: {'the playlist ' + focus if focus else 'the whole canvas'}.")
     return '\n'.join(lines)
 
 
-def plan(llm, about, place, day, canvas, focus, text):
-    user = render_context(place, day, canvas, focus) + f'\n\nHe typed: "{text}"'
+def plan(llm, about, place, day, canvas, focus, text, lens=None):
+    """-> (actions, say, lens) where lens is the new subject, '' to clear it, or None for no change."""
+    user = render_context(place, day, canvas, focus, lens) + f'\n\nHe typed: "{text}"'
     out = llm.tool(system_prompt(about), user, TOOL, max_tokens=1500, timeout=60, retries=1, wait=3)
     acts = [a for a in out.get('actions') or [] if isinstance(a, dict) and a.get('target')]
     for a in acts:
@@ -145,7 +152,12 @@ def plan(llm, about, place, day, canvas, focus, text):
                 op['index'] = max(1, op['n']) - 1
             if isinstance(op.get('to'), int):
                 op['to'] = max(1, op['to']) - 1
-    return acts, (out.get('say') or '').strip() or None
+    new_lens = out.get('lens')
+    if isinstance(new_lens, str):
+        new_lens = '' if new_lens.strip().lower() in ('none', 'clear', '') else new_lens.strip()[:80]
+    else:
+        new_lens = None
+    return acts, (out.get('say') or '').strip() or None, new_lens
 
 
 # -- the stand-in when the gateway is down ---------------------------------------------------------------------------

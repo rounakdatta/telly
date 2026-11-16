@@ -190,6 +190,22 @@ class TellyModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** Today's subject to learn about ("" clears it). The stories are rewritten to lean on it. */
+    fun setLens(text: String) {
+        viewModelScope.launch {
+            try {
+                val d = api.setLens(text.trim())
+                prefs.cachedDay = d
+                absorb(d)
+                _state.update { it.copy(day = d, note = Note(d.lens?.let { l -> "Today you're learning about $l. The stories will lean on it." }
+                    ?: "No subject for today, then.")) }
+            } catch (e: TellyError) {
+                _state.update { it.copy(note = Note(e.message ?: "Couldn't set it.", problem = true)) }
+            }
+            poll()
+        }
+    }
+
     fun tweak(id: String, name: String) = mutate(id, name) { api.tweak(id, name) }
     fun swap(id: String, index: Int) = mutate(id, "swap$index") { api.edit(id, "swap", index) }
     fun remove(id: String, index: Int) = mutate(id, "remove$index") { api.edit(id, "remove", index) }

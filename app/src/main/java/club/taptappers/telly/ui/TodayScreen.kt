@@ -50,6 +50,8 @@ fun TodayScreen(
     onPlay: (String) -> Unit,
     onLibrary: () -> Unit,
     onExample: (String) -> Unit,
+    onLens: () -> Unit,
+    onLensIdea: (String) -> Unit,
     bottomSpace: androidx.compose.ui.unit.Dp,
 ) {
     val top = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
@@ -58,10 +60,10 @@ fun TodayScreen(
         contentPadding = PaddingValues(top = top + 18.dp, bottom = bottomSpace + 24.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        item(key = "header") { Header(day, offline, onLibrary) }
+        item(key = "header") { Header(day, offline, onLibrary, onLens) }
         when {
             day == null && !loaded -> Unit // not loaded yet: say nothing rather than flash an empty canvas
-            day == null || day.sessions.isEmpty() -> item(key = "empty") { BlankCanvas(onExample) }
+            day == null || day.sessions.isEmpty() -> item(key = "empty") { BlankCanvas(day, onExample, onLensIdea) }
             else -> items(day.sessions, key = { it.id }) { s ->
                 SessionCard(s, onOpen = { onOpen(s) }, onPlay = onPlay, modifier = Modifier.animateItem())
             }
@@ -70,7 +72,7 @@ fun TodayScreen(
 }
 
 @Composable
-private fun Header(day: Day?, offline: String?, onLibrary: () -> Unit) {
+private fun Header(day: Day?, offline: String?, onLibrary: () -> Unit, onLens: () -> Unit) {
     val label = day?.label ?: ""
     val weekday = label.substringBefore(", ", label)
     val date = label.substringAfter(", ", "")
@@ -80,14 +82,21 @@ private fun Header(day: Day?, offline: String?, onLibrary: () -> Unit) {
             val line = listOfNotNull(date.ifEmpty { null }, day?.weather).joinToString("  ·  ")
             if (line.isNotEmpty()) Text(line, style = T.caption, color = C.text2, modifier = Modifier.padding(top = 4.dp))
             if (offline != null) Text("Offline: showing what you had. $offline", style = T.caption, color = C.text3, modifier = Modifier.padding(top = 6.dp))
+            // Today's subject, once there is a canvas to lean on it; before that the blank canvas asks for it in full.
+            if (day != null && (day.lens != null || day.sessions.isNotEmpty())) {
+                Chip(
+                    day.lens?.let { "Learning: $it" } ?: "Something to learn today?",
+                    onClick = onLens, icon = R.drawable.ic_spark, modifier = Modifier.padding(top = 14.dp),
+                )
+            }
         }
         GlassCircle(R.drawable.ic_library, "Earlier days", onLibrary, Modifier.padding(top = 6.dp))
     }
 }
 
-/** First thing in the morning the canvas is blank. One line, and a few ways to start. */
+/** First thing in the morning the canvas is blank. Two questions (what's on, and what to learn), a few ways to start. */
 @Composable
-private fun BlankCanvas(onExample: (String) -> Unit) {
+private fun BlankCanvas(day: Day?, onExample: (String) -> Unit, onLensIdea: (String) -> Unit) {
     Column(Modifier.fillMaxWidth().padding(horizontal = 22.dp).padding(top = 56.dp)) {
         Text("What's today?", style = T.title, color = C.text)
         Spacer(Modifier.height(10.dp))
@@ -98,6 +107,16 @@ private fun BlankCanvas(onExample: (String) -> Unit) {
         Spacer(Modifier.height(22.dp))
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             EXAMPLES.forEach { Chip(it, onClick = { onExample(it) }) }
+        }
+        if (day != null && day.lens == null && day.lensIdeas.isNotEmpty()) {
+            Spacer(Modifier.height(40.dp))
+            Text("And something to learn?", style = T.headline, color = C.text)
+            Spacer(Modifier.height(6.dp))
+            Text("Pick a subject and every story today leans on it.", style = T.caption, color = C.text2)
+            Spacer(Modifier.height(14.dp))
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                day.lensIdeas.forEach { Chip(it, onClick = { onLensIdea(it) }, icon = R.drawable.ic_spark) }
+            }
         }
     }
 }

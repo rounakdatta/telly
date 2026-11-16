@@ -40,6 +40,8 @@ CREATE TABLE IF NOT EXISTS resolved (
 CREATE TABLE IF NOT EXISTS served (track_id TEXT NOT NULL, ts REAL NOT NULL, session_id TEXT NOT NULL, pool TEXT);
 CREATE INDEX IF NOT EXISTS served_ts ON served(ts);
 CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT);
+-- Work for the worker process: one row per session waiting to be synced (a newer request replaces an older one).
+CREATE TABLE IF NOT EXISTS jobs (session_id TEXT PRIMARY KEY, queued REAL NOT NULL);
 """
 
 
@@ -153,6 +155,45 @@ class Store:
         with self.db() as c:
             c.execute(f"INSERT INTO resolved(id, {cols}) VALUES(?{', ?' * len(fields)}) "
                       f"ON CONFLICT(id) DO UPDATE SET {', '.join(f'{k}=excluded.{k}' for k in fields)}", (tid, *fields.values()))
+
+    # -- the queue between the API and the worker --------------------------------------------------------------------
+    def enqueue(self, sid):
+        with self.db() as c:
+            c.execute('INSERT INTO jobs(session_id, queued) VALUES(?, ?) ON CONFLICT(session_id) DO UPDATE SET queued=excluded.queued',
+                      (sid, time.time()))
+
+    def claim(self):
+        """Take the oldest waiting session, or None. A request that arrives while it syncs queues it again."""
+        with self.db() as c:
+            c.execute('BEGIN IMMEDIATE')
+            r = c.execute('SELECT session_id FROM jobs ORDER BY queued LIMIT 1').fetchone()
+            if r:
+                c.execute('DELETE FROM jobs WHERE session_id=?', (r['session_id'],))
+            c.execute('COMMIT')
+        return r['session_id'] if r else None
+
+    # -- the day's lens: what he wants to learn about today -----------------------------------------------------------
+    def lens(self, day):
+        return (self.get(f'lens:{day}') or {}).get('text')
+
+    def set_lens(self, day, text):
+        self.put(f'lens:{day}', {'text': text, 'at': time.time()} if text else None)
+
+    def stories_since(self, ts, exclude_session=None):
+        """Earlier stories, newest first: [(day, title, first sentence, Wikipedia source)]."""
+        with self.db() as c:
+            rows = c.execute('SELECT id, day, story FROM sessions WHERE story IS NOT NULL AND created > ? AND id != ? AND deleted=0 '
+                             'ORDER BY created DESC', (ts, exclude_session or '')).fetchall()
+        out = []
+        for r in rows:
+            try:
+                st = json.loads(r['story'])
+            except ValueError:
+                continue
+            body = (st.get('body') or '').strip()
+            first = body.split('. ')[0][:220] + ('.' if body else '')
+            out.append((r['day'], st.get('title') or '', first, st.get('source') or ''))
+        return out
 
     # -- what has been served (wear-out between sessions) --------------------------------------------------------
     def mark_served(self, sid, tracks):

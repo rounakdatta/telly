@@ -35,7 +35,6 @@ def day_label(day):
 class Canvas:
     def __init__(self, store, catalogs, place, llm):
         self.store, self.catalogs, self.place, self.llm = store, catalogs, place, llm
-        self.jobs = None
         self.lock = threading.RLock()
 
     @property
@@ -57,7 +56,7 @@ class Canvas:
         now = self.place.now()
         return {'day': day, 'label': day_label(day), 'today': day == now.date().isoformat(),
                 'weather': self.place.weather(now.replace(minute=0)) if day == now.date().isoformat() else None,
-                'sessions': sessions}
+                'lens': self.store.lens(day), 'lens_ideas': lens_ideas(day), 'sessions': sessions}
 
     def session(self, sid):
         s = self.store.session(sid)
@@ -121,9 +120,9 @@ class Canvas:
         canvas = [(s, self.store.version(s['id'])) for s in self.store.sessions_on(day) if s['version'] > 0]
         if focus and not any(s['id'] == focus for s, _ in canvas):
             focus = None
-        say, rough = None, False
+        say, rough, new_lens = None, False, None
         try:
-            actions, say = interpret.plan(self.llm, self.about, self.place, day, canvas, focus, text)
+            actions, say, new_lens = interpret.plan(self.llm, self.about, self.place, day, canvas, focus, text, self.store.lens(day))
         except Exception as e:
             log.warning('planner unavailable, using rules: %s', str(e)[:160])
             focus_brief = next((v['brief'] for s, v in canvas if s['id'] == focus), None)
@@ -136,6 +135,9 @@ class Canvas:
                 return {'reply': "I can't read that right now (the language model is unreachable). The buttons still work.",
                         'focus': focus, 'day': self.day(day), 'rough': True}
         replies, last = [], focus
+        if new_lens is not None:
+            got = self.set_lens(day, new_lens)
+            replies.append(f"Today's subject: {got}. The stories will lean on it." if got else 'No subject for today, then.')
         with self.lock:
             ids = {s['id'] for s, _ in canvas}
             for a in actions:
@@ -234,13 +236,22 @@ class Canvas:
     def delete(self, sid):
         with self.lock:
             self.store.update_session(sid, deleted=1)
-        if self.jobs:
-            self.jobs.push(sid)
+        self.store.enqueue(sid)
 
     def resync(self, sid):
-        if self.jobs:
-            self.jobs.push(sid)
+        self.store.enqueue(sid)
         return self.session(sid)
+
+    # -- the day's lens -------------------------------------------------------------------------------------------------
+    def set_lens(self, day, text):
+        """What he wants to learn about today. Every playlist's story is rewritten to lean on it."""
+        text = ' '.join((text or '').split())[:80]
+        self.store.set_lens(day, text or None)
+        for s in self.store.sessions_on(day):
+            if s['version'] > 0:
+                self.store.update_session(s['id'], story_state='pending')
+                self.store.enqueue(s['id'])
+        return text or None
 
     # -- helpers -------------------------------------------------------------------------------------------------------
     def _served(self, sid):
@@ -250,8 +261,21 @@ class Canvas:
         self.store.add_version(sid, source, said, reply, brief, slim(tracks))
         self.store.mark_served(sid, tracks)
         self.store.update_session(sid, ytm_state='pending' if self.store.session(sid).get('ytm_state') != 'off' else 'off')
-        if self.jobs:
-            self.jobs.push(sid)
+        self.store.enqueue(sid)
+
+
+LENS_IDEAS = ['20th-century history', 'Something romantic', 'Pop culture of the 2000s', 'Indiranagar', 'The Bengal Renaissance',
+              'Cinema', 'The Partition', 'The Jazz Age', 'Mughal India', 'The space race', 'Cricket', 'Food and how we eat',
+              'The Cold War', "Bollywood's golden age", 'Architecture', 'Explorers', 'Women who changed music', 'Old Bangalore',
+              'Science', 'Myths and epics', 'The 1970s', 'Cities', 'Rivers', 'Inventions', 'Love letters']
+
+
+def lens_ideas(day, n=5):
+    """A few subjects to offer, different each day (deterministic, so a reload doesn't reshuffle them)."""
+    import random
+    pool = list(LENS_IDEAS)
+    random.Random(day).shuffle(pool)
+    return pool[:n]
 
 
 def _hhmm(s):

@@ -62,17 +62,20 @@ class ScreenshotTest {
         val haze = HazeState()
         Box(Modifier.fillMaxSize()) {
             Ambient(hourTint(17))
-            TodayScreen(day, loaded, null, haze, {}, {}, {}, {}, 96.dp)
+            TodayScreen(day, loaded, null, haze, {}, {}, {}, {}, {}, {}, 96.dp)
             Composer(draft, {}, "What's today?", false, {}, {}, haze, note, {}, Modifier.align(Alignment.BottomCenter))
         }
     }
 
     @Test
-    fun today_blank() = shoot("1-today-blank") { Canvas(Day("2026-11-16", "Sunday, 16 November", true, "26°, partly cloudy")) }
+    fun today_blank() = shoot("1-today-blank") {
+        Canvas(Day("2026-11-16", "Sunday, 16 November", true, "26°, partly cloudy",
+            lensIdeas = listOf("20th-century history", "Something romantic", "Pop culture of the 2000s", "Indiranagar", "The Jazz Age")))
+    }
 
     @Test
     fun today_with_playlists() = shoot("2-today-canvas") {
-        Canvas(Day("2026-11-16", "Sunday, 16 November", true, "26°, partly cloudy", listOf(run, walk)),
+        Canvas(Day("2026-11-16", "Sunday, 16 November", true, "26°, partly cloudy", lens = "20th-century history", sessions = listOf(run, walk)),
             note = Note("Added a few Bengali songs into the middle of your run."), draft = "")
     }
 

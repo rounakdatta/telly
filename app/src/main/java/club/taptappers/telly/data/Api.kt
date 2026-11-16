@@ -38,6 +38,8 @@ class Api(private val prefs: Prefs) {
     suspend fun prompt(text: String, focus: String?, day: String = "today"): PromptResult =
         post("/api/day/$day/prompt", buildJsonObject { put("text", text); focus?.let { put("focus", it) } })
 
+    suspend fun setLens(text: String, day: String = "today"): Day = post("/api/day/$day/lens", buildJsonObject { put("text", text) })
+
     suspend fun tweak(id: String, tweak: String): Session = post("/api/session/$id/tweak", buildJsonObject { put("tweak", tweak) })
     suspend fun edit(id: String, op: String, index: Int): Session =
         post("/api/session/$id/edit", buildJsonObject { put("op", op); put("index", index) })
@@ -70,9 +72,9 @@ class Api(private val prefs: Prefs) {
         } catch (e: TellyError) {
             throw e
         } catch (e: UnknownHostException) {
-            throw TellyError("Can't find the server. Is Tailscale on?")
+            throw TellyError("Can't find the server. Check your connection.")
         } catch (e: ConnectException) {
-            throw TellyError("Can't reach the server. Is Tailscale on?")
+            throw TellyError("Can't reach the server. Check your connection.")
         } catch (e: SocketTimeoutException) {
             throw TellyError("The server is taking too long. Try again in a moment.")
         } catch (e: IOException) {
