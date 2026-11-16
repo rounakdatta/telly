@@ -353,7 +353,7 @@ NOTES_TOOL = {
     'input_schema': {
         'type': 'object',
         'properties': {
-            'thread': {'type': 'string', 'description': 'One sentence: what joins these songs (only these)'},
+            'thread': {'type': 'string', 'description': "At most 16 words: what joins these songs, the way you'd say it on the tape's spine; never a list of names"},
             'intro': {'type': 'string', 'description': 'Two to four sentences before the first song'},
             'notes': {'type': 'array', 'items': {'type': 'object', 'properties': {
                 'n': {'type': 'integer'}, 'text': {'type': 'string', 'description': 'One or two sentences, at most 34 words'}},
@@ -410,10 +410,19 @@ Rules:
     notes = {tracks[i]['id']: said_ok[k] for k, i in enumerate(order) if said_ok[k]}
     # The opening and the last line may draw on any song: they're read against all the sources at once.
     raw = {k: ' '.join(str(out.get(k) or '').split()) for k in ('thread', 'intro', 'outro')}
-    keys = [k for k in ('thread', 'intro', 'outro') if raw[k]]
     # The opening is about how the mix begins and the last line about how it ends: each is read against those songs
     # (a long mix's sources together would be cut short before its closer).
     ends = lambda ts: ' | '.join(f"{t['title']} by {t['artist']}: {(sources.get(t['id']) or 'nothing')[:1200]}" for t in ts)
-    against = {'thread': everything, 'intro': ends(tracks[:5]), 'outro': ends(tracks[-5:])}
-    framed = dict(zip(keys, settle(llm, [(against[k], raw[k]) for k in keys], words=60, limit=9000, opinions=True))) if keys else {}
+    minutes = round(sum(E.dur_ms(t) for t in tracks) / 60000)
+    mix = (f"The mix \"{mix_title}\": {len(tracks)} songs, about {minutes} minutes, for {moment}"
+           + (f", made for the subject he asked for, \"{lens}\" (the mix's premise, which its framing may state)" if lens else '')
+           + ': ' + '; '.join(f"{t['title']} — {t['artist']}" for t in tracks) + '. ')
+    against = {'thread': mix + everything, 'intro': mix + ends(tracks[:5]), 'outro': mix + ends(tracks[-5:])}
+    framed = {}
+    if raw['thread']:  # the tape's spine: one short line, its own form kept through any rewrite
+        framed['thread'] = settle(llm, [(against['thread'], raw['thread'])], words=16, limit=9000, opinions=True,
+                                  form='Keep it one short line about what joins the songs; never a list of their names. ')[0]
+    rest = [k for k in ('intro', 'outro') if raw[k]]
+    if rest:
+        framed.update(zip(rest, settle(llm, [(against[k], raw[k]) for k in rest], words=60, limit=9000, opinions=True)))
     return {'thread': framed.get('thread', '')[:300], 'intro': framed.get('intro', ''), 'outro': framed.get('outro', ''), 'notes': notes}
