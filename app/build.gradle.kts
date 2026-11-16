@@ -16,8 +16,8 @@ android {
         targetSdk = 35
         // 2.x is the playlist canvas; 1.x was the tale runner (git tag tales-final). Same id and signing key, so the
         // new app installs over the old one.
-        versionCode = 220
-        versionName = "2.2.0"
+        versionCode = 230
+        versionName = "2.3.0"
     }
 
     // Releases are signed with telly's own key, kept only in GitHub's encrypted secrets (backed up in Bitwarden as
