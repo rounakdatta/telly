@@ -13,9 +13,9 @@ data class WordsStatus(val status: String = "pending", val aligned: Int? = null,
 @Serializable
 data class SongRef(val id: String? = null, val title: String? = null, val artist: String? = null)
 
-/** A note from Genius placed on one line (its index in `lines`), in the words of a friend leaning over. */
+/** A note from Genius on the passage of `lines` from `line` to `end`, in the words of a friend leaning over. */
 @Serializable
-data class LineNote(val line: Int = 0, val text: String = "")
+data class LineNote(val line: Int = 0, val end: Int? = null, val text: String = "")
 
 @Serializable
 data class Trivia(

@@ -195,6 +195,15 @@ class EngineTest(Base):
         self.assertEqual(order[3]['id'], order2[3]['id'])
 
 
+class _Pages:
+    """Genius, for the notes tests: every song has a one-line story (no network)."""
+    def page(self, title, artist):
+        return {'about': f'{title} is a song by {artist}.', 'links': []}
+
+
+PAGES = _Pages()
+
+
 class NotesTest(Base):
     def test_notes_are_written_once_per_song_and_kept_short(self):
         from telly import notes as N
@@ -205,15 +214,15 @@ class NotesTest(Base):
         class FakeLLM:
             def tool(self, system, user, tool, **kw):
                 calls.append(user)
-                n = user.count('his history:')
+                n = user.count('    Genius:')
                 return {'notes': [{'n': i, 'note': f'Listen for the bass line in song {i}.'} for i in range(1, n + 1)] +
                         [{'n': 1, 'note': 'x' * 400}]}  # an essay, which must not survive
         real, N.snippet = N.snippet, lambda store, t: None  # no network in tests
         try:
-            got = N.write(FakeLLM(), 'a listener', 'a walk', order, store)
+            got = N.write(FakeLLM(), 'a listener', 'a walk', order, store, genius=PAGES)
             self.assertEqual(len(order), len(got))
             self.assertTrue(all(len(v) <= 240 for v in got.values()))
-            N.write(FakeLLM(), 'a listener', 'a walk', order, store)
+            N.write(FakeLLM(), 'a listener', 'a walk', order, store, genius=PAGES)
         finally:
             N.snippet = real
         self.assertEqual(1, len(calls), 'notes already written are reused, not written again')
@@ -228,7 +237,7 @@ class NotesTest(Base):
             def tool(self, system, user, tool, **kw):
                 calls.append(user)
                 return {'notes': [{'n': i, 'note': f'Listen for the drums in this one, number {i}.'}
-                                  for i in range(1, user.count('his history:') + 1)]}
+                                  for i in range(1, user.count('    Genius:') + 1)]}
         asked = []
 
         def down(q):
@@ -236,7 +245,7 @@ class NotesTest(Base):
             raise N.Unreachable('timed out')
         real_intro, N.intro = N.intro, down
         try:
-            got = N.write(FakeLLM(), 'a listener', 'a run', tracks, store)
+            got = N.write(FakeLLM(), 'a listener', 'a run', tracks, store, genius=PAGES)
         finally:
             N.intro = real_intro
         self.assertEqual(45, len(got), 'every song gets a note, however long the playlist')
@@ -255,7 +264,7 @@ class NotesTest(Base):
         real, N.snippet = N.snippet, lambda store, t: None
         try:
             with self.assertRaises(RuntimeError):
-                N.write(Empty(), 'a listener', 'a walk', tracks, store)
+                N.write(Empty(), 'a listener', 'a walk', tracks, store, genius=PAGES)
         finally:
             N.snippet = real
         self.assertEqual(1, len(N.unwritten(tracks, store)), 'asked about again next time, not blank for weeks')
@@ -276,10 +285,39 @@ class NotesTest(Base):
         finally:
             N.intro = real
 
-    def test_history_lines_read_like_a_friend_would_say_them(self):
-        from telly.notes import history
-        self.assertIn("you've played it 45 times", history({'pool': 'comfort', 'plays': 45, 'first_ts': NOW - 400 * DAY}, NOW))
-        self.assertTrue(history({'pool': 'new_known'}, NOW).startswith('new to you'))
+    def test_notes_are_trivia_never_his_own_listening(self):
+        from telly import notes as N
+        store = Store(os.path.join(self.tmp.name, 'notes5.db'))
+        tracks = [{'id': 'h1', 'title': 'Night Changes', 'artist': 'One Direction', 'pool': 'comfort', 'plays': 24, 'first_ts': NOW - 900 * DAY},
+                  {'id': 'h2', 'title': 'Nobody Knows Me', 'artist': 'Nobody', 'pool': 'comfort', 'plays': 3}]
+        seen = []
+
+        class Spy:
+            def tool(self, system, user, tool, **kw):
+                seen.append(user)
+                return {'notes': [{'n': 1, 'note': 'It was the last single the band made with Zayn Malik.'}, {'n': 2, 'note': ''}]}
+
+        class Pages:
+            def page(self, title, artist):
+                return {'about': 'Night Changes was the last One Direction single to feature Zayn Malik.', 'links': []} if 'Night' in title else None
+        real, N.snippet = N.snippet, lambda store, t: None
+        try:
+            got = N.write(Spy(), 'a listener', 'a walk', tracks, store, genius=Pages())
+        finally:
+            N.snippet = real
+        self.assertNotIn('24', seen[0], "his play counts aren't given to the friend at all")
+        self.assertIn('Zayn Malik', seen[0], "the song's Genius story is")
+        self.assertEqual({'h1': 'It was the last single the band made with Zayn Malik.'}, got)
+
+    def test_notes_from_older_rules_are_dropped_once(self):
+        from telly import notes as N
+        store = Store(os.path.join(self.tmp.name, 'notes6.db'))
+        store.put_notes({'old': "You've played this 45 times."})
+        N.migrate(store)
+        self.assertEqual({}, store.notes_for(['old']))
+        store.put_notes({'new': 'A fact.'})
+        N.migrate(store)
+        self.assertEqual({'new': 'A fact.'}, store.notes_for(['new']), 'only once')
 
 
 class YtmParseTest(unittest.TestCase):

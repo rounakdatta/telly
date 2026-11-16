@@ -99,9 +99,25 @@ class GeniusTest(unittest.TestCase):
                 {'fragment': 'कर दे मुझे मुझसे ही रिहा', 'roman': 'Kar de mujhe mujhse hi riha', 'text': 'C'},
                 {'fragment': 'Is this the real life? Is this just fantasy?', 'text': 'D'},
                 {'fragment': 'Something else entirely, never sung', 'text': 'E'}]
-        self.assertEqual([{'line': 0, 'text': 'D'}, {'line': 2, 'text': 'A'}, {'line': 3, 'text': 'C'}], place(refs, lines))
+        self.assertEqual([{'line': 0, 'end': 1, 'text': 'D'}, {'line': 2, 'end': 2, 'text': 'A'}, {'line': 3, 'end': 3, 'text': 'C'}], place(refs, lines),
+                         'the opening question runs over its two lines; "Put a gun…" is not a line here, so A stays on one')
         # a fragment that begins with its section's name begins at its first sung line
-        self.assertEqual([{'line': 2, 'text': 'F'}], place([{'fragment': '[Verse 1]\nMama, just killed a man', 'text': 'F'}], lines))
+        self.assertEqual([{'line': 2, 'end': 2, 'text': 'F'}], place([{'fragment': '[Verse 1]\nMama, just killed a man', 'text': 'F'}], lines))
+
+    def test_a_note_covers_the_passage_its_annotation_spans(self):
+        lines = [{'text': 'Is this the real life? Is this just fantasy?'}, {'text': 'Caught in a landslide, no escape from reality'},
+                 {'text': 'Open your eyes, look up to the skies and see'}, {'text': ''}, {'text': 'Mama, just killed a man'},
+                 {'text': "Put a gun against his head, pulled my trigger, now he's dead"}, {'text': 'Mama, life had just begun'},
+                 {'text': 'Kar de mujhe mujhse hi rihaa'}, {'text': 'Ab mujhko bhi ho deedar mera'}]
+        refs = [{'fragment': '[Intro]\nIs this the real life?\nIs this just fantasy?\nCaught in a landslide,\nNo escape from reality', 'text': 'A'},
+                {'fragment': 'Mama, just killed a man\nPut a gun against his head', 'text': 'B'},
+                {'fragment': 'Open your eyes', 'text': 'C'},
+                {'fragment': 'कर दे मुझे मुझसे ही रिहा\nअब मुझको भी हो दीदार मेरा', 'roman': 'Kar de mujhe mujhse hi riha\nAb mujhko bhi ho deedar mera', 'text': 'D'}]
+        self.assertEqual([(0, 1, 'A'), (2, 2, 'C'), (4, 5, 'B'), (7, 8, 'D')], [(x['line'], x['end'], x['text']) for x in place(refs, lines)],
+                         'two lines in one LRC line, a passage ending inside a line, and a romanised passage')
+        # a pause in the singing ends a passage, and a passage never runs into another's lines
+        self.assertEqual([(2, 2, 'E')], [(x['line'], x['end'], x['text']) for x in place(
+            [{'fragment': 'Open your eyes, look up to the skies and see\nMama, just killed a man', 'text': 'E'}], lines)])
 
     def test_the_song_playing_is_looked_up_first_and_skipped_ones_are_let_go(self):
         import telly.genius as G
@@ -148,7 +164,7 @@ class GeniusTest(unittest.TestCase):
         self.assertTrue(g.idle())
         got = g.trivia('Bohemian Rhapsody - Remastered 2011', 'Queen', lines)
         self.assertEqual('ready', got['status'], 'the same song under a remaster title is the same page')
-        self.assertEqual([{'line': 1, 'text': 'The ballad section begins with this question.'}], got['lines'])
+        self.assertEqual([{'line': 1, 'end': 1, 'text': 'The ballad section begins with this question.'}], got['lines'])
         self.assertEqual(1, FakeGenius.looks)
 
 
@@ -200,7 +216,7 @@ class NowApiTest(Base):
         self.assertTrue(self.genius.idle())
         code, again = self.req('GET', '/api/lyrics/p0123456789ab?known=v1')
         self.assertEqual((200, [], True), (code, again['lines'], again['unchanged']), 'lines the phone has are not sent again')
-        self.assertEqual([{'line': 1, 'text': 'The ballad section begins with this question.'}], again['trivia']['lines'])
+        self.assertEqual([{'line': 1, 'end': 1, 'text': 'The ballad section begins with this question.'}], again['trivia']['lines'])
         self.assertEqual(400, self.req('GET', '/api/now?since=x')[0])
         self.assertEqual(400, self.req('GET', '/api/now?wait=nan')[0])
         self.assertEqual(429, self.req('GET', '/api/now?since=-1&wait=0')[0], 'asking what plays has an hourly budget (4 here)')

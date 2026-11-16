@@ -51,7 +51,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.TransformOrigin
@@ -81,6 +84,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import club.taptappers.telly.R
+import club.taptappers.telly.data.LineNote
 import club.taptappers.telly.data.LyricLine
 import club.taptappers.telly.data.LyricsResult
 import club.taptappers.telly.data.Playing
@@ -92,9 +96,10 @@ import kotlinx.coroutines.delay
 private val Whisper = Color(0xFFF2CF8C)
 
 /**
- * A row as drawn. A sung line carries its words and when each starts, and perhaps a whisper (what a Genius annotation
- * says about it, in a friend's words). A row with no words is a pause in the singing (`gap`, drawn as breathing dots)
- * or the song's opening; either may carry something to say (`say`).
+ * A row as drawn. A sung line carries its words and when each starts. Lines a Genius annotation covers form a
+ * `passage` (rows with the same number), and the passage's last line carries the `whisper`: what the annotation says,
+ * in a friend's words. A row with no words is a pause in the singing (`gap`, drawn as breathing dots) or the song's
+ * opening; either may carry something to say (`say`).
  */
 data class Shown(
     val start: Long,
@@ -105,6 +110,7 @@ data class Shown(
     val timed: Boolean = false,
     val whisper: String? = null,
     val say: String? = null,
+    val passage: Int? = null,
 )
 
 /**
@@ -113,8 +119,9 @@ data class Shown(
  * sweeps as it is sung (and takes the real times the moment they arrive). Long silences become gaps. `says` are
  * spoken in order: the first as the song opens, the rest in pauses long enough to read them.
  */
-fun shape(lines: List<LyricLine>, durationMs: Long?, whispers: Map<Int, String> = emptyMap(), says: List<String> = emptyList()): List<Shown> {
+fun shape(lines: List<LyricLine>, durationMs: Long?, notes: List<LineNote> = emptyList(), says: List<String> = emptyList()): List<Shown> {
     val out = mutableListOf<Shown>()
+    val rowOf = mutableMapOf<Int, Int>() // a sung line of the lyrics -> its row
     val sung = lines.withIndex().filter { it.value.text.isNotBlank() }
     if (sung.isEmpty()) return out
     var said = 0
@@ -137,8 +144,17 @@ fun shape(lines: List<LyricLine>, durationMs: Long?, whispers: Map<Int, String> 
             var acc = 0
             texts.map { w -> (w to (line.start + span * acc / total)).also { acc += w.length + 1 } }
         }
-        out += Shown(line.start, end, line.text, words, timed = starts != null, whisper = whispers[src])
+        rowOf[src] = out.size
+        out += Shown(line.start, end, line.text, words, timed = starts != null)
         if (next != null && next - end >= 5000) out += Shown(end, next, "", emptyList(), gap = true, say = if (next - end >= 9000) nextSay() else null)
+    }
+    // Each note over the rows of the lines it covers; it is said under the last of them.
+    notes.forEachIndexed { k, n ->
+        val rows = (n.line..maxOf(n.line, n.end ?: n.line)).mapNotNull { rowOf[it] }
+        val a = rows.minOrNull() ?: return@forEachIndexed
+        val b = rows.max()
+        if ((a..b).any { out[it].passage != null }) return@forEachIndexed // passages never overlap
+        for (r in a..b) out[r] = out[r].copy(passage = k, whisper = if (r == b) n.text else null)
     }
     return out
 }
@@ -155,13 +171,13 @@ fun activeAt(shown: List<Shown>, pos: Long): Int {
     return ans
 }
 
-/** The rows for a song: its lines, its Genius whispers, and what to say as it opens (telly's own note first). */
+/** The rows for a song: its lines, the passages Genius annotates, and what to say in its opening and its pauses (what
+ *  Genius says about the song; telly's own note when Genius has nothing, so the same fact isn't said twice). */
 @Composable
 fun rememberShown(playing: Playing?, lyrics: LyricsResult?, note: String?): List<Shown> =
     remember(lyrics?.version, lyrics?.lines, lyrics?.trivia, note, playing?.durationMs) {
         val t = lyrics?.trivia
-        shape(lyrics?.lines.orEmpty(), playing?.durationMs, t?.lines.orEmpty().associate { it.line to it.text },
-            listOfNotNull(note) + t?.about.orEmpty())
+        shape(lyrics?.lines.orEmpty(), playing?.durationMs, t?.lines.orEmpty(), t?.about.orEmpty().ifEmpty { listOfNotNull(note) })
     }
 
 @Composable
@@ -296,6 +312,12 @@ private fun Lines(shown: List<Shown>, l: LyricsResult?, active: Int, pos: () -> 
                 if (still) list.scrollToItem(active) else list.animateScrollToItem(active)
             }
         }
+        // Each passage's first and last rows, so a row knows whether its passage is being sung, sung, or still to come.
+        val passages = remember(shown) {
+            shown.withIndex().filter { it.value.passage != null }.groupBy { it.value.passage!! }
+                .mapValues { (_, rows) -> rows.first().index..rows.last().index }
+        }
+        val gapPx = with(LocalDensity.current) { 16.dp.toPx() }
         LazyColumn(
             Modifier.fillMaxSize().nestedScroll(follow), state = list,
             contentPadding = PaddingValues(top = h * 0.24f, bottom = h * 0.62f, start = 24.dp, end = 30.dp),
@@ -307,17 +329,25 @@ private fun Lines(shown: List<Shown>, l: LyricsResult?, active: Int, pos: () -> 
                     i < active -> -1
                     else -> 1
                 }
-                Column(Modifier.fillMaxWidth()) {
+                // A passage is sung while any of its lines is: its margin rule brightens, and its note arrives.
+                val span = s.passage?.let { passages[it] }
+                val passageState = when {
+                    span == null -> state
+                    active in span -> 0
+                    active > span.last -> -1
+                    else -> 1
+                }
+                Column(Modifier.fillMaxWidth().then(if (span != null) Modifier.passageRule(passageState, i == span.first, i == span.last, gapPx) else Modifier)) {
                     when {
                         s.text.isNotEmpty() -> Line(s, state, pos, still)
                         s.gap -> Gap(s, state, pos)
                     }
                     // What a friend says: in a pause, or as the song opens.
                     s.say?.let { Box(Modifier.padding(top = if (s.gap) 12.dp else 0.dp)) { Said(it, bright = state == 0) } }
-                    // A whisper arrives as its line is sung and stays with it; lines still to come keep theirs to themselves.
+                    // The note arrives as its passage begins and stays with it; passages still to come keep theirs.
                     s.whisper?.let { w ->
-                        AnimatedVisibility(visible = state <= 0, enter = fadeIn(tween(500)) + expandVertically(tween(320))) {
-                            Whispered(w, bright = state == 0)
+                        AnimatedVisibility(visible = passageState <= 0, enter = fadeIn(tween(500)) + expandVertically(tween(320))) {
+                            Whispered(w, bright = passageState == 0)
                         }
                     }
                 }
@@ -375,14 +405,27 @@ private fun Said(text: String, bright: Boolean) {
     Text(text, style = T.reading, color = Whisper.copy(alpha = alpha))
 }
 
-/** What a Genius annotation says about the line just sung, as a friend would whisper it. */
+/** What a Genius annotation says about the passage just sung, as a friend would whisper it (inside the passage's rule). */
 @Composable
 private fun Whispered(text: String, bright: Boolean) {
     val alpha by animateFloatAsState(if (bright) 0.9f else 0.45f, tween(380), label = "whisper")
-    Row(Modifier.padding(top = 8.dp, end = 8.dp)) {
-        Box(Modifier.padding(top = 9.dp).size(5.dp).graphicsLayer { this.alpha = alpha }.clip(CircleShape).background(Whisper))
-        Spacer(Modifier.width(10.dp))
-        Text(text, style = T.body, color = Whisper.copy(alpha = alpha))
+    Text(text, style = T.body, color = Whisper.copy(alpha = alpha), modifier = Modifier.padding(top = 8.dp, end = 8.dp))
+}
+
+/**
+ * The margin rule beside the lines a note is about: a thin gold line in the left margin, like a reader's mark in a book.
+ * Faint for a passage still to come (a note is waiting there), bright while it's sung, quiet once it has been. Rows of
+ * one passage join up across the space between them.
+ */
+@Composable
+private fun Modifier.passageRule(state: Int, first: Boolean, last: Boolean, gapPx: Float): Modifier {
+    val alpha by animateFloatAsState(when (state) { 0 -> 0.85f; -1 -> 0.3f; else -> 0.16f }, tween(380), label = "rule")
+    return drawBehind {
+        val w = 2.5.dp.toPx()
+        val top = if (first) 6.dp.toPx() else 0f
+        val bottom = size.height - (if (last) 4.dp.toPx() else 0f) + (if (last) 0f else gapPx)
+        // Square ends: rounded ones left a notch where two rows of a passage meet (a 2.5 dp rule needs no rounding).
+        drawRect(Whisper.copy(alpha = alpha), topLeft = Offset(-14.dp.toPx(), top), size = Size(w, bottom - top))
     }
 }
 
@@ -437,7 +480,7 @@ private fun Progress(p: Playing, pos: () -> Long, onOpenPlayer: (String) -> Unit
             Spacer(Modifier.weight(1f))
             if (dur > 0) Text("−" + clock((dur / 1000 - second).coerceAtLeast(0)), style = T.tabular, color = C.text3)
         }
-        if (p.app.isNotEmpty()) {
+        if (p.player != "the player") { // the players telly can open (declared in the manifest's <queries>)
             GlassPill("Open ${p.player}", if (p.app.contains("spotify")) R.drawable.ic_spotify else R.drawable.ic_ytmusic,
                 onClick = { onOpenPlayer(p.app) }, modifier = Modifier.padding(top = 14.dp).align(Alignment.CenterHorizontally))
         }

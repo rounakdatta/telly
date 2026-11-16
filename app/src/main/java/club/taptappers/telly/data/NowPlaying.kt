@@ -62,6 +62,8 @@ data class Playing(
     companion object {
         /** A paused song stays on screen this long after the helper last spoke; then it's taken as put away. */
         private const val PAUSED_SHOWN_MS = 20 * 60 * 1000L
+        /** A helper gone quiet while its song played is believed this long (the watch lets go after 5 minutes too). */
+        private const val STALE_SHOWN_MS = 5 * 60 * 1000L
         /** The answer took about this long to arrive: the position is moved on by it. */
         private const val TRANSIT_MS = 120L
 
@@ -69,6 +71,8 @@ data class Playing(
         fun of(v: PhoneView, receivedAt: Long = SystemClock.elapsedRealtime()): Playing? {
             val title = v.title?.takeIf { it.isNotBlank() } ?: return null
             if (!v.active && (v.ageMs ?: Long.MAX_VALUE) > PAUSED_SHOWN_MS) return null
+            // A helper silent for minutes while "playing" has stopped (or been killed): the song isn't still going.
+            if (v.stale && (v.ageMs ?: 0) > STALE_SHOWN_MS) return null
             return Playing(app = v.app.orEmpty(), title = title, artist = v.artist.orEmpty(), durationMs = v.durationMs?.takeIf { it > 0 },
                 playing = v.playing, positionMs = v.positionMs.coerceAtLeast(0), at = receivedAt - TRANSIT_MS,
                 speed = v.speed.takeIf { it > 0f } ?: 1f, songId = v.songId)

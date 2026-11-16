@@ -1,8 +1,9 @@
 """One line per song: what an excited, well-read friend leans over and tells you as it starts.
 
-Facts come only from the song's Wikipedia opening (or its film's, or its artist's) and from the listener's own history
-with it; when neither has anything worth saying the friend points at something to listen for, or says nothing. Notes
-are cached per song for three weeks, so changing a playlist only writes notes for the songs that are new to it.
+Trivia and cultural references, never his own listening ("you've played this 45 times" was the weakest kind of note):
+facts come only from the song's Genius page (its story, and what it samples or covers) and its Wikipedia opening (or
+its film's, or its artist's). When neither has anything worth saying, the friend says nothing. Notes are cached per
+song for three weeks, so changing a playlist only writes notes for the songs that are new to it.
 """
 import json
 import re
@@ -10,7 +11,8 @@ import time
 import urllib.parse
 import urllib.request
 
-from .genius import clean
+from .genius import Genius, clean
+from .genius import Unreachable as GeniusUnreachable
 from .story import UA, _get, _plain, is_disambiguation, relevant  # noqa: F401  (UA kept for callers)
 from .textnorm import ntrack
 
@@ -77,9 +79,13 @@ def snippet(store, t):
             time.sleep(0.2)
         if not hit:
             continue
-        # Only an article named for the song is the song's ("Home" in a singer's opening lines is not).
+        # Only an article named for the song is the song's ("Home" in a singer's opening lines is not); a soundtrack's
+        # or an album's is about all its songs ("lyrics by A and B" may be true of the album and not of this one).
         if kind == 'song' and _names(title, hit[0]):
             return 'song', hit
+        if kind == 'song' and re.search(r'\(soundtrack\)|\(album\)|\bsoundtrack\b', hit[0], re.I) and fallback is None:
+            fallback = ('album', hit)
+            continue
         if kind == 'film' and _names(film.group(1), hit[0]):
             return 'film', hit
         if fallback is None and kind != 'film' and (_names(t['artist'], hit[0]) or _names(t['artist'], hit[1][:300])):
@@ -87,23 +93,18 @@ def snippet(store, t):
     return fallback
 
 
-def history(t, now):
-    """What his own listening says about a song, in words the friend can use."""
-    month = lambda ts: time.strftime('%B %Y', time.gmtime(ts)) if ts else None
-    if t.get('pool') == 'asked':
-        return 'you asked for it by name'
-    if str(t.get('pool', '')).startswith('new'):
-        return 'new to you' + (' (from an artist you play a lot)' if t.get('pool') == 'new_known' else ' (fans of artists you love play it)')
-    bits = []
-    if t.get('plays'):
-        bits.append(f"you've played it {t['plays']} times")
-    if t.get('first_ts'):
-        bits.append(f"first in {month(t['first_ts'])}")
-    if t.get('last_ts') and now - t['last_ts'] > 90 * 86400:
-        bits.append(f"last in {month(t['last_ts'])}")
-    if t.get('liked'):
-        bits.append('liked')
-    return ', '.join(bits) or 'one you know'
+RULES = 2  # bump when the rules change: notes written under older ones are dropped once, and recent playlists rewritten
+
+
+def migrate(store):
+    """Notes written under older rules (they counted his plays) are dropped, once, and the last two days' playlists
+    are marked for notes again (the worker picks them up as unfinished)."""
+    if store.get('notes_rules') == RULES:
+        return
+    with store.db() as c:
+        c.execute('DELETE FROM notes')
+        c.execute("UPDATE sessions SET notes_state = 'pending' WHERE deleted = 0 AND created > ?", (time.time() - 2 * 86400,))
+    store.put('notes_rules', RULES)
 
 
 def unwritten(tracks, store):
@@ -112,22 +113,23 @@ def unwritten(tracks, store):
     return [t for t in tracks if t['id'] not in have]
 
 
-def write(llm, about, moment, tracks, store, now=None, batch=20, batches=None):
+def write(llm, about, moment, tracks, store, now=None, batch=20, batches=None, genius=None):
     """Notes for these tracks -> {track_id: note}. Every song without a fresh note gets one, in batches (at most
     `batches` of them this call: the worker writes one at a time, so a playlist waiting to sync never waits long); a
     song the friend had nothing to say about is remembered as blank, so it isn't asked about again."""
     now = now or time.time()
+    genius = genius or Genius(store, None)
     todo = unwritten(tracks, store)
     for n, i in enumerate(range(0, len(todo), batch)):
         if batches is not None and n >= batches:
             break
-        _write_batch(llm, about, moment, todo[i:i + batch], store, now)
+        _write_batch(llm, about, moment, todo[i:i + batch], store, now, genius)
     return {k: v for k, v in store.notes_for([t['id'] for t in tracks]).items() if v}
 
 
 def _snippets(store, todo):
-    """Each song's source, one lookup at a time (Wikipedia asks for that). Should it stop answering, the rest go
-    without, and nothing is remembered about them -> (snippets, down)."""
+    """Each song's Wikipedia opening, one lookup at a time (Wikipedia asks for that). Should it stop answering, the rest
+    go without, and nothing is remembered about them -> (snippets, down)."""
     snips = []
     for t in todo:
         try:
@@ -137,31 +139,60 @@ def _snippets(store, todo):
     return snips, False
 
 
-def _write_batch(llm, about, moment, todo, store, now):
+def _pages(genius, todo):
+    """Each song's Genius page (read once, kept, and shared with the whispers in its lyrics) -> (pages, down)."""
+    pages = []
+    for t in todo:
+        try:
+            pages.append(genius.page(t['title'], t['artist']))
+        except GeniusUnreachable:
+            return pages + [None] * (len(todo) - len(pages)), True
+    return pages, False
+
+
+def _genius_source(page):
+    if not page:
+        return None
+    about = ' '.join((page.get('about') or '').split())
+    about = '' if about in ('', '?') else about[:700]
+    links = '; '.join(page.get('links') or [])
+    return ' '.join(x for x in (about, f'(connections: {links})' if links else '') if x) or None
+
+
+def _write_batch(llm, about, moment, todo, store, now, genius):
     snips, down = _snippets(store, todo)
-    lines = []
-    for i, (t, sn) in enumerate(zip(todo, snips), 1):
-        src = f'{sn[0]} article "{sn[1][0]}": {sn[1][1][:600]}' if sn else 'no article found'
-        lines.append(f"[{i}] {t['title']} — {t['artist']}\n    his history: {history(t, now)}\n    source: {src}")
-    system = f"""You sit next to one listener while his playlist plays, a well-read friend who loves music and can't help
-leaning over as each song starts. About him: {about}"""
+    pages, gdown = _pages(genius, todo)
+    down = down or gdown  # a song is only remembered as having nothing to say when every source was asked
+    lines, sourced = [], 0
+    for i, (t, sn, pg) in enumerate(zip(todo, snips, pages), 1):
+        g = _genius_source(pg)
+        w = f'{sn[0]} article "{sn[1][0]}": {sn[1][1][:600]}' if sn else None
+        sourced += bool(g or w)
+        lines.append(f"[{i}] {t['title']} — {t['artist']}\n    Genius: {g or 'nothing'}\n    Wikipedia: {w or 'nothing'}")
+    if not sourced:
+        if not down:
+            store.put_notes({t['id']: '' for t in todo})  # nothing known about any of them: nothing to say
+        return {}
+    system = f"""You sit next to one listener while his playlist plays: a well-read friend who loves music and can't help
+leaning over as each song starts with something worth knowing about it. About him: {about}"""
     user = f"""The playlist is for: {moment}
 
 {chr(10).join(lines)}
 
-For each song, write the one thing you'd say as it starts: a fun fact, a bit of history, something to listen for, or a
-callback to his own history with it. One or two short sentences, at most 26 words.
+For each song, the one thing you'd tell him as it starts: a piece of trivia, a cultural reference, the story behind
+it, where it came from or what it led to. One or two short sentences, at most 26 words.
 
 Rules:
-- A fact must be stated in that song's source in so many words, or in his history. Never combine or infer: "nominated
-  five times between 1977 and 1981" is not "this song nearly won". Never invent dates, numbers, chart positions,
-  quotes or stories, and never join two facts into a cause ("thanks to", "because", "after") unless the source does.
-- A source labelled "artist" or "film" is about the artist or the film: say its facts about them, not about this song.
-- When neither has anything worth saying, point to something to listen for in terms that can't be wrong, or leave it
-  empty.
-- Talk to him as "you". Warm and a little playful; no hype words; at most one exclamation mark across all the notes.
-- Vary how the notes begin. Not every note is trivia: mix in personal ones ("You've played this 45 times; first in
-  March 2023") and things to listen for."""
+- A fact must be stated in that song's sources in so many words. Never combine or infer: "nominated five times
+  between 1977 and 1981" is not "this song nearly won". Never invent dates, numbers, chart positions, quotes or
+  stories, and never join two facts into a cause ("thanks to", "because", "after") unless the source does.
+- A Wikipedia article labelled "artist", "film" or "album" is about the artist, the film or the whole album: say its
+  facts about them, never as facts about this song ("the album's lyrics are by A and B" isn't "this song's are").
+- Never mention his own listening: how often he plays it, when he first heard it, whether it's new to him.
+- When the sources have nothing worth saying about a song, leave its note empty. No filler ("a classic", "listen for
+  the guitar") unless a source says it.
+- Talk to him as "you" when it helps. Warm and a little playful; no hype words; at most one exclamation mark across
+  all the notes. Vary how they begin."""
     out = llm.tool(system, user, TOOL, max_tokens=1800, timeout=90, retries=1, wait=10)
     got, usable = {}, 0
     for item in out.get('notes') or []:

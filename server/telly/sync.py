@@ -66,6 +66,7 @@ class Worker(threading.Thread):
     def run(self):
         # A job leaves the queue when its work starts, so a restart mid-sync (every deploy) would strand it: put
         # back everything still marked as in progress.
+        notes_mod.migrate(self.store)  # notes written under older rules are written again
         for sid in self.store.unfinished():
             self.store.enqueue(sid)
         while True:

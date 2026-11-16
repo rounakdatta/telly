@@ -390,7 +390,8 @@ class TellyModel(app: Application) : AndroidViewModel(app) {
                     errors = 0
                     onPlaying(Playing.of(v))
                 } catch (e: TellyError) {
-                    if (e.code == 503) return@launch // the server has no lyrics service: nothing to follow
+                    // Never for good: a deploy restarts the server (Traefik answers 503 meanwhile), a train goes under
+                    // a bridge. Back off, and carry on when it answers.
                     delay(minOf(30_000L, 2_000L shl minOf(errors++, 4)))
                 }
             }
@@ -427,11 +428,10 @@ class TellyModel(app: Application) : AndroidViewModel(app) {
             val r = try {
                 api.lyrics(id, got?.version).let { n -> if (n.unchanged) n.copy(lines = got?.lines.orEmpty(), unchanged = false) else n }
             } catch (e: TellyError) {
-                if (e.code == 503 || ++errors >= 4) {
-                    _state.update { if (it.playing?.key == p.key) it.copy(lyricsError = e.message) else it }
-                    return
-                }
-                delay(3000L * errors)
+                // Say so when there's nothing on screen yet, but keep trying while the song plays: a restart or a
+                // dropped connection mustn't leave a song without its words, or its words without their timing.
+                if (got == null && ++errors >= 3) _state.update { if (it.playing?.key == p.key) it.copy(lyricsError = e.message) else it }
+                delay(minOf(60_000L, 3_000L * maxOf(errors, 1)))
                 continue
             }
             errors = 0
