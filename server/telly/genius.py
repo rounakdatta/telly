@@ -25,6 +25,7 @@ BROWSER = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko
 KEEP_NONE = 14 * 86400   # "Genius has no page for it" is asked again after a fortnight
 RETRY = 15 * 60          # a failed look (network, the model) is tried again after this
 STALE = 30               # a song not asked about for this long (the phone asks every few seconds) was skipped past
+RULES = 2                # bump when the prompt's rules change: cached notes from older rules are written again
 TOOL = {
     'name': 'trivia',
     'description': 'What a friend would say while this song plays.',
@@ -186,6 +187,8 @@ Write:
 Rules:
 - Each must be stated in the text above in so many words. Never combine or infer, never add dates, numbers, chart
   places or quotes that aren't there.
+- Never join two facts into a cause ("thanks to", "because", "after", "which led to") unless the text joins them in
+  so many words: a film that put the song back in the charts did not make it the most streamed song.
 - Say who says something only as the text does: never credit a claim to the band, the artist or anyone the text
   doesn't name for it. When the text hedges ("may", "some think", "reportedly"), keep the hedge or skip it.
 - Leave out guesses about private lives (love affairs, sexuality, illness, feuds) unless the artist said it in the text.
@@ -205,7 +208,8 @@ Rules:
     # -- the cache, and the look in the background ------------------------------------------------------------------
     @staticmethod
     def key(title, artist):
-        return f'genius:{nartist(first_artist(artist))}|{ntrack(title)}'
+        # The version changes with the rules the notes are written by, so notes written under older ones are rewritten.
+        return f'genius{RULES}:{nartist(first_artist(artist))}|{ntrack(title)}'
 
     def _run(self):
         while True:

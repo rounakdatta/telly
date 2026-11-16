@@ -155,7 +155,7 @@ callback to his own history with it. One or two short sentences, at most 26 word
 Rules:
 - A fact must be stated in that song's source in so many words, or in his history. Never combine or infer: "nominated
   five times between 1977 and 1981" is not "this song nearly won". Never invent dates, numbers, chart positions,
-  quotes or stories.
+  quotes or stories, and never join two facts into a cause ("thanks to", "because", "after") unless the source does.
 - A source labelled "artist" or "film" is about the artist or the film: say its facts about them, not about this song.
 - When neither has anything worth saying, point to something to listen for in terms that can't be wrong, or leave it
   empty.
