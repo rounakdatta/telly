@@ -93,8 +93,13 @@ fun Ambient(tint: Color, art: String? = null) {
 }
 
 /** An artwork URL at the size it is shown (lh3 URLs take their size as a suffix): a 52 dp row needs ~160 px, not 544. */
-fun sized(url: String?, px: Int): String? =
-    url?.let { if ("googleusercontent.com" in it || "ggpht.com" in it) it.replace(Regex("=w\\d+-h\\d+.*$"), "=w$px-h$px-l90-rj") else it }
+fun sized(url: String?, px: Int): String? = url?.let {
+    when {
+        "googleusercontent.com" in it || "ggpht.com" in it -> it.replace(Regex("=w\\d+-h\\d+.*$"), "=w$px-h$px-l90-rj")
+        "mzstatic.com" in it -> it.replace(Regex("/\\d+x\\d+bb\\.jpg$"), "/${px}x${px}bb.jpg") // Apple's covers: any size by name
+        else -> it
+    }
+}
 
 /** A deterministic, muted two-colour tile for a song without artwork yet (same song, same colours, every time). */
 fun placeholderBrush(seed: String): Brush {

@@ -35,7 +35,6 @@ import club.taptappers.telly.ui.Composer
 import club.taptappers.telly.ui.Exchange
 import club.taptappers.telly.ui.ExchangeCard
 import club.taptappers.telly.ui.LibraryScreen
-import club.taptappers.telly.ui.LyricsInvite
 import club.taptappers.telly.ui.LyricsScreen
 import club.taptappers.telly.ui.MiniPlayer
 import club.taptappers.telly.ui.LocalEffects
@@ -147,7 +146,7 @@ class ScreenshotTest {
 
     @Test
     fun lyrics_singing() = shoot("10-lyrics-singing") {
-        LyricsScreen(rhapsody, rhapsodyWords, null, null, {}, {}, {}, {}, {}, {}, {}, null)
+        LyricsScreen(rhapsody, rhapsodyWords, null, null, null, {}, {}, {}, {}, null)
     }
 
     @Test
@@ -155,17 +154,17 @@ class ScreenshotTest {
         LyricsScreen(rhapsody.copy(positionMs = 2_000), rhapsodyWords.copy(lines = rhapsodyWords.lines.map { it.copy(start = it.start + 9_000, end = it.end?.plus(9_000)) }),
             null, Spot(run.copy(tracks = run.tracks.mapIndexed { i, t ->
                 if (i == 3) t.copy(title = "Bohemian Rhapsody", artist = "Queen", note = "You've played this 31 times; first in June 2019.") else t
-            }), 3), {}, {}, {}, {}, {}, {}, {}, null)
+            }), 3), null, {}, {}, {}, {}, null)
     }
 
     @Test
     fun lyrics_finding() = shoot("12-lyrics-finding") {
-        LyricsScreen(rhapsody, null, null, null, {}, {}, {}, {}, {}, {}, {}, null)
+        LyricsScreen(rhapsody, null, null, null, null, {}, {}, {}, {}, null)
     }
 
     @Test
     fun lyrics_nothing_playing() = shoot("13-lyrics-nothing") {
-        LyricsScreen(null, null, null, null, {}, {}, {}, {}, {}, {}, {}, "6:30 pm run" to "https://music.youtube.com/watch?v=x&list=PLx")
+        LyricsScreen(null, null, null, null, null, {}, {}, {}, {}, "6:30 pm run" to "https://music.youtube.com/watch?v=x&list=PLx")
     }
 
     @Test
@@ -176,28 +175,15 @@ class ScreenshotTest {
             TodayScreen(Day("2026-11-16", "Monday, 16 November", true, "26°, partly cloudy", sessions = listOf(run, walk)), true, null, haze,
                 {}, {}, {}, {}, {}, {}, 162.dp)
             Composer("", {}, "What's today?", false, {}, {}, haze, Modifier.align(Alignment.BottomCenter)) {
-                MiniPlayer(rhapsody, rhapsodyWords, {}, {}, haze, Modifier.padding(bottom = 10.dp))
-            }
-        }
-    }
-
-    @Test
-    fun today_invite() = shoot("15-today-invite") {
-        val haze = HazeState()
-        Box(Modifier.fillMaxSize()) {
-            Ambient(hourTint(17))
-            TodayScreen(Day("2026-11-16", "Monday, 16 November", true, "26°, partly cloudy", sessions = listOf(run)), true, null, haze,
-                {}, {}, {}, {}, {}, {}, 246.dp)
-            Composer("", {}, "What's today?", false, {}, {}, haze, Modifier.align(Alignment.BottomCenter)) {
-                LyricsInvite(false, {}, {}, {}, haze, Modifier.padding(bottom = 10.dp))
+                MiniPlayer(rhapsody, rhapsodyWords, null, {}, haze, Modifier.padding(bottom = 10.dp))
             }
         }
     }
 
     companion object {
         /** Paused 10.7 s in: the second line half sung (its words timed), a whisper beneath the first. */
-        val rhapsody = Playing("com.google.android.apps.youtube.music", "Bohemian Rhapsody", "Queen", "A Night at the Opera", 354_320,
-            playing = false, buffering = false, positionMs = 10_700, at = 0, speed = 1f)
+        val rhapsody = Playing("com.google.android.apps.youtube.music", "Bohemian Rhapsody", "Queen", 354_320,
+            playing = false, positionMs = 10_700, at = 0, speed = 1f, songId = "p121ce7db5300")
 
         val rhapsodyWords = LyricsResult(
             song = SongRef("p121ce7db5300", "Bohemian Rhapsody", "Queen"), kind = "synced", version = "v1",

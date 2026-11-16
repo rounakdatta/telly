@@ -1,40 +1,22 @@
 """What's playing on the phone, and its lyrics timed word by word, from LeZeppLean (on the same homelab).
 
-LeZeppLean already does the hard part for the watch: given what the phone's player says (title, artist, length), it
-finds the song's synced lyrics on LRCLIB for that very recording, then times every word against the recording itself
-(vocals separated, wav2vec 2.0, forced alignment), once per song, kept. telly speaks to it the way LeZeppLean's own
-phone helper does (POST /phone: it is the same phone, playing the same song), learns which song that is, and asks for
-its lyrics (POST /lyrics). Lines come back with word starts only where the aligner is sure; the rest are timed line by
-line. Songs in other scripts come back in Latin letters (what the watch shows), timed in those.
+LeZeppLean's helper app on the phone already reads the music player (Android shows it only to an app with notification
+access, and Google blocks sideloading new apps that ask for it) and tells LeZeppLean what plays and where, the moment
+that changes. LeZeppLean works out which song that is, finds its synced lyrics on LRCLIB for that very recording, and
+times every word against the recording itself (vocals separated, wav2vec 2.0, forced alignment), once per song, kept.
+telly only reads: what the phone plays (GET /phone/next, which waits for a change) and a song's lyrics (POST /lyrics).
+Lines come back with word starts only where the aligner is sure; the rest are timed line by line. Songs in other
+scripts come back in Latin letters (what the watch shows), timed in those.
 """
 import json
 import urllib.error
 import urllib.request
 
-STATES = ('playing', 'paused', 'stopped', 'buffering')
-DAY_MS = 6 * 3600 * 1000
+VIEW = ('version', 'app', 'title', 'artist', 'durationMs', 'playing', 'active', 'stale', 'positionMs', 'speed', 'songId', 'ageMs')
 
 
 class LyricsError(Exception):
     pass
-
-
-def player_state(body):
-    """The phone's report, checked and trimmed -> dict, or None when it names no song."""
-    def text(k, n):
-        v = body.get(k)
-        return ' '.join(v.split())[:n] if isinstance(v, str) else ''
-
-    def num(k, lo, hi):
-        v = body.get(k)
-        return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and lo <= v <= hi else None
-
-    title = text('title', 300)
-    if not title:
-        return None
-    return {'app': text('app', 100), 'title': title, 'artist': text('artist', 300), 'album': text('album', 300) or None,
-            'durationMs': num('durationMs', 1, DAY_MS), 'state': body.get('state') if body.get('state') in STATES else 'playing',
-            'positionMs': num('positionMs', 0, DAY_MS) or 0.0, 'speed': num('speed', 0.1, 4) or 1.0, 'sentAt': num('sentAt', 1, 1e14)}
 
 
 class Lyrics:
@@ -56,19 +38,11 @@ class Lyrics:
         except (urllib.error.URLError, TimeoutError, ValueError) as e:
             raise LyricsError(f'{path}: {e}') from None
 
-    def now(self, state):
-        """The phone's player state (player_state()) -> the song it is playing and its lyrics. The song is worked out
-        a moment after a new one is reported: when it isn't yet, wait briefly for the change that names it, and
-        otherwise say "pending" (the phone asks again)."""
-        sent = self._call('POST', '/phone', state)
-        song_id = sent.get('songId')
-        if not song_id:
-            view = self._call('GET', f"/phone/next?since={int(sent.get('version', -1))}&wait=4", timeout=9)
-            if view.get('songId') and (view.get('title') or '').casefold() == state['title'].casefold():
-                song_id = view['songId']
-        if not song_id:
-            return {'song': None, 'kind': 'pending', 'version': None, 'lines': [], 'words': {'status': 'pending'}}
-        return self.lyrics(song_id)
+    def phone(self, since=-1, wait=0.0):
+        """What the phone's player is doing, as LeZeppLean's helper last said, with the position as of now. When the
+        phone already has version `since`, this waits (up to `wait` s, at most 8) for the next change."""
+        v = self._call('GET', f'/phone/next?since={int(since)}&wait={max(0.0, min(float(wait), 8.0))}', timeout=14)
+        return {k: v.get(k) for k in VIEW}
 
     def lyrics(self, song_id):
         d = self._call('POST', '/lyrics', {'song': song_id})

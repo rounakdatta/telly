@@ -170,11 +170,11 @@ fun LyricsScreen(
     lyrics: LyricsResult?,
     error: String?,
     spot: Spot?,
+    /** The song's cover: Apple's, or its YouTube Music art when it's in one of telly's playlists. */
+    art: String?,
     onClose: () -> Unit,
-    onSeek: (Long) -> Unit,
-    onPlayPause: () -> Unit,
-    onNext: () -> Unit,
-    onPrevious: () -> Unit,
+    /** Opens the player app (by package): pausing and skipping happen there. */
+    onOpenPlayer: (String) -> Unit,
     onRetry: () -> Unit,
     onOpenUrl: (String) -> Unit,
     /** Something to play when nothing is: today's latest playlist, as (its name, its YouTube Music link). */
@@ -195,34 +195,29 @@ fun LyricsScreen(
     val shown = rememberShown(playing, lyrics, note)
     val active by remember(shown) { derivedStateOf { activeAt(shown, pos.longValue) } }
 
-    Box(Modifier.fillMaxSize().background(C.bg)) {
+    Box(Modifier.fillMaxSize()) {
         // The cover, blurred into the room's light (Android 12+; earlier, a flat dark room).
-        val art = playing?.art
-        if (art != null && Build.VERSION.SDK_INT >= 31 && LocalEffects.current) {
-            Image(art.asImageBitmap(), null, contentScale = ContentScale.Crop,
-                modifier = Modifier.fillMaxSize().graphicsLayer { alpha = 0.5f }.blur(90.dp))
-        }
-        Box(Modifier.fillMaxSize().background(Brush.verticalGradient(0f to C.bg.copy(alpha = 0.35f), 0.6f to C.bg.copy(alpha = 0.7f), 1f to C.bg)))
+        Ambient(Color.Transparent, art = art.takeIf { playing != null })
 
         Column(Modifier.fillMaxSize().padding(top = top, bottom = bottom)) {
-            Header(playing, spot, onClose)
+            Header(playing, spot, art, onClose)
             Box(Modifier.weight(1f).fillMaxWidth()) {
                 when {
                     playing == null -> NothingPlaying(suggestion, onOpenUrl)
-                    shown.isNotEmpty() -> Lines(shown, lyrics, active, { pos.longValue }, onSeek, onOpenUrl)
+                    shown.isNotEmpty() -> Lines(shown, lyrics, active, { pos.longValue }, onOpenUrl)
                     else -> Unsung(lyrics, error, note, onRetry)
                 }
             }
-            if (playing != null) Controls(playing, { pos.longValue }, onSeek, onPlayPause, onNext, onPrevious)
+            if (playing != null) Progress(playing, { pos.longValue }, onOpenPlayer)
         }
     }
 }
 
 @Composable
-private fun Header(p: Playing?, spot: Spot?, onClose: () -> Unit) {
+private fun Header(p: Playing?, spot: Spot?, art: String?, onClose: () -> Unit) {
     Row(Modifier.fillMaxWidth().padding(start = 20.dp, end = 14.dp, top = 12.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
         if (p != null) {
-            Cover(p, 52.dp, 10.dp)
+            Art(art, p.title, 52.dp, 10.dp)
             Spacer(Modifier.width(14.dp))
         }
         Column(Modifier.weight(1f)) {
@@ -235,20 +230,13 @@ private fun Header(p: Playing?, spot: Spot?, onClose: () -> Unit) {
     }
 }
 
-@Composable
-private fun Cover(p: Playing?, size: Dp, corner: Dp) {
-    Box(Modifier.size(size).clip(RoundedCornerShape(corner)).background(placeholderBrush(p?.title ?: "telly"))) {
-        p?.art?.let { Image(it.asImageBitmap(), null, contentScale = ContentScale.Crop, modifier = Modifier.matchParentSize()) }
-    }
-}
-
 /** Nothing playing: say how to start, and offer today's playlist when there is one. */
 @Composable
 private fun NothingPlaying(suggestion: Pair<String, String>?, onOpenUrl: (String) -> Unit) {
     Column(Modifier.fillMaxSize().padding(horizontal = 28.dp), verticalArrangement = Arrangement.Center) {
         Text("Play something, and its words show here as they're sung.", style = T.headline, color = C.text)
         Spacer(Modifier.height(10.dp))
-        Text("From YouTube Music or Spotify, while telly is open.", style = T.body, color = C.text2)
+        Text("From YouTube Music or Spotify. The LeZeppLean helper on this phone tells telly what's playing.", style = T.body, color = C.text2)
         suggestion?.let { (name, url) ->
             Spacer(Modifier.height(24.dp))
             PrimaryPill("Play $name", R.drawable.ic_ytmusic, onClick = { onOpenUrl(url) })
@@ -287,8 +275,7 @@ private fun Unsung(l: LyricsResult?, error: String?, note: String?, onRetry: () 
 }
 
 @Composable
-private fun Lines(shown: List<Shown>, l: LyricsResult?, active: Int, pos: () -> Long, onSeek: (Long) -> Unit, onOpenUrl: (String) -> Unit) {
-    val view = LocalView.current
+private fun Lines(shown: List<Shown>, l: LyricsResult?, active: Int, pos: () -> Long, onOpenUrl: (String) -> Unit) {
     val still = reducedMotion()
     BoxWithConstraints(Modifier.fillMaxSize()) {
         val h = maxHeight
@@ -320,13 +307,7 @@ private fun Lines(shown: List<Shown>, l: LyricsResult?, active: Int, pos: () -> 
                     i < active -> -1
                     else -> 1
                 }
-                Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
-                    .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, role = Role.Button,
-                        onClickLabel = "Play from here") {
-                        view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-                        touched.longValue = 0L
-                        onSeek(s.start)
-                    }) {
+                Column(Modifier.fillMaxWidth()) {
                     when {
                         s.text.isNotEmpty() -> Line(s, state, pos, still)
                         s.gap -> Gap(s, state, pos)
@@ -434,67 +415,43 @@ private fun Breathing() {
     Box(Modifier.size(9.dp).graphicsLayer { alpha = a }.clip(CircleShape).background(C.text))
 }
 
+/** Where in the song (read-only: telly can't move the player) and the way to the player, to pause or skip there. */
 @Composable
-private fun Controls(p: Playing, pos: () -> Long, onSeek: (Long) -> Unit, onPlayPause: () -> Unit, onNext: () -> Unit, onPrevious: () -> Unit) {
+private fun Progress(p: Playing, pos: () -> Long, onOpenPlayer: (String) -> Unit) {
     val dur = p.durationMs ?: 0L
-    val view = LocalView.current
     // Elapsed and remaining (and what TalkBack reads), redrawn once a second rather than every frame.
     val second by remember { derivedStateOf { pos() / 1000 } }
     Column(Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 12.dp)) {
-        // Progress, read in the draw phase only; a tap on it seeks there.
-        Box(Modifier.fillMaxWidth().height(24.dp).pointerInput(dur) {
-            if (dur > 0) detectTapGestures { o ->
-                view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-                onSeek((o.x / size.width * dur).toLong().coerceIn(0, dur))
-            }
-        }.semantics {
+        Box(Modifier.fillMaxWidth().height(3.dp).clip(RoundedCornerShape(2.dp)).background(C.glass).semantics {
             contentDescription = "Position in the song"
-            if (dur > 0) {
-                progressBarRangeInfo = ProgressBarRangeInfo((second * 1000f / dur).coerceIn(0f, 1f), 0f..1f)
-                setProgress("Seek") { f -> onSeek((f * dur).toLong().coerceIn(0, dur)); true }
-            }
-        }, contentAlignment = Alignment.Center) {
-            Box(Modifier.fillMaxWidth().height(3.dp).clip(RoundedCornerShape(2.dp)).background(C.glass)) {
-                Box(Modifier.fillMaxHeight().fillMaxWidth().graphicsLayer {
-                    scaleX = if (dur > 0) (pos().toFloat() / dur).coerceIn(0f, 1f) else 0f
-                    transformOrigin = TransformOrigin(0f, 0.5f)
-                }.background(C.text.copy(alpha = 0.85f)))
-            }
+            if (dur > 0) progressBarRangeInfo = ProgressBarRangeInfo((second * 1000f / dur).coerceIn(0f, 1f), 0f..1f)
+        }) {
+            // Read in the draw phase only.
+            Box(Modifier.fillMaxHeight().fillMaxWidth().graphicsLayer {
+                scaleX = if (dur > 0) (pos().toFloat() / dur).coerceIn(0f, 1f) else 0f
+                transformOrigin = TransformOrigin(0f, 0.5f)
+            }.background(C.text.copy(alpha = 0.85f)))
         }
-        Row(Modifier.fillMaxWidth()) {
+        Row(Modifier.fillMaxWidth().padding(top = 6.dp)) {
             Text(clock(second), style = T.tabular, color = C.text3)
             Spacer(Modifier.weight(1f))
             if (dur > 0) Text("−" + clock((dur / 1000 - second).coerceAtLeast(0)), style = T.tabular, color = C.text3)
         }
-        Row(Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
-            Transport(R.drawable.ic_prev, "Previous song", onPrevious, 52.dp, filled = false)
-            Spacer(Modifier.width(28.dp))
-            val on = p.playing || p.buffering
-            Transport(if (on) R.drawable.ic_pause else R.drawable.ic_play, if (on) "Pause" else "Play", onPlayPause, 64.dp, filled = true)
-            Spacer(Modifier.width(28.dp))
-            Transport(R.drawable.ic_next, "Next song", onNext, 52.dp, filled = false)
+        if (p.app.isNotEmpty()) {
+            GlassPill("Open ${p.player}", if (p.app.contains("spotify")) R.drawable.ic_spotify else R.drawable.ic_ytmusic,
+                onClick = { onOpenPlayer(p.app) }, modifier = Modifier.padding(top = 14.dp).align(Alignment.CenterHorizontally))
         }
     }
 }
 
 private fun clock(s: Long) = "${s / 60}:${(s % 60).toString().padStart(2, '0')}"
 
-@Composable
-private fun Transport(icon: Int, label: String, onClick: () -> Unit, size: Dp, filled: Boolean) {
-    val view = LocalView.current
-    Box(Modifier.size(size).clip(CircleShape).background(if (filled) Color.White else Color.Transparent)
-        .clickable(role = Role.Button, onClickLabel = label) { view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP); onClick() }
-        .semantics { contentDescription = label }, contentAlignment = Alignment.Center) {
-        Icon(painterResource(icon), null, tint = if (filled) Color.Black else C.text, modifier = Modifier.size(size * 0.46f))
-    }
-}
-
 /**
  * The song playing, just above the composer while telly is open: its line being sung right now under its name (or
- * the artist, between lines and for songs without words). Tap for the words; the button plays and pauses.
+ * the artist, between lines and for songs without words). Tap for the words.
  */
 @Composable
-fun MiniPlayer(p: Playing, lyrics: LyricsResult?, onOpen: () -> Unit, onPlayPause: () -> Unit, haze: HazeState, modifier: Modifier = Modifier) {
+fun MiniPlayer(p: Playing, lyrics: LyricsResult?, art: String?, onOpen: () -> Unit, haze: HazeState, modifier: Modifier = Modifier) {
     val shown = rememberShown(p, lyrics, null)
     // The line being sung, worked out when it changes rather than every frame: wait until the next line starts.
     val line by produceState<String?>(null, p, shown) {
@@ -513,48 +470,14 @@ fun MiniPlayer(p: Playing, lyrics: LyricsResult?, onOpen: () -> Unit, onPlayPaus
             .clickable(role = Role.Button, onClickLabel = "Show the words", onClick = onOpen).padding(8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Cover(p, 40.dp, 8.dp)
+        Art(art, p.title, 40.dp, 8.dp)
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
             Text(p.title, style = T.bodyStrong, color = C.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Text(line ?: p.artist, style = T.small, color = if (line != null) C.text else C.text2, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
-        val on = p.playing || p.buffering
-        Box(Modifier.size(40.dp).clip(CircleShape).clickable(role = Role.Button, onClickLabel = if (on) "Pause" else "Play", onClick = onPlayPause),
-            contentAlignment = Alignment.Center) {
-            Icon(painterResource(if (on) R.drawable.ic_pause else R.drawable.ic_play), if (on) "Pause" else "Play", tint = C.text, modifier = Modifier.size(22.dp))
-        }
-    }
-}
-
-/**
- * The offer, once, at the bottom of the day: see the words of whatever's playing. Android files the permission under
- * notification access, so the card says what telly does with it. If he went to allow it and came back without, it
- * says what Android needs first (a sideloaded app's "restricted setting").
- */
-@Composable
-fun LyricsInvite(stuck: Boolean, onAllow: () -> Unit, onAppInfo: () -> Unit, onDecline: () -> Unit, haze: HazeState, modifier: Modifier = Modifier) {
-    val shape = RoundedCornerShape(20.dp)
-    Column(modifier.fillMaxWidth().clip(shape).glass(haze).border(1.dp, C.hairline, shape).padding(horizontal = 16.dp, vertical = 14.dp)) {
-        Text("See the words of whatever's playing, lit as they're sung.", style = T.bodyStrong, color = C.text)
-        Spacer(Modifier.height(4.dp))
-        Text(
-            if (stuck) "If Android greys the switch out as a restricted setting: open App info, its three-dot menu, Allow restricted settings. Then try again."
-            else "Android calls this notification access. telly only looks at the music player, and only while it's open.",
-            style = T.caption, color = C.text2,
-        )
-        Row(Modifier.padding(top = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text(if (stuck) "Try again" else "Allow", style = T.bodyStrong, color = Color.Black,
-                modifier = Modifier.clip(RoundedCornerShape(16.dp)).background(Color.White).clickable(role = Role.Button, onClick = onAllow)
-                    .padding(horizontal = 16.dp, vertical = 8.dp))
-            if (stuck) {
-                Spacer(Modifier.width(8.dp))
-                Text("App info", style = T.bodyStrong, color = C.text,
-                    modifier = Modifier.clip(RoundedCornerShape(16.dp)).clickable(role = Role.Button, onClick = onAppInfo).padding(horizontal = 12.dp, vertical = 8.dp))
-            }
-            Spacer(Modifier.weight(1f))
-            Text("Not now", style = T.caption, color = C.text3, textAlign = TextAlign.End,
-                modifier = Modifier.clip(RoundedCornerShape(12.dp)).clickable(role = Role.Button, onClick = onDecline).padding(horizontal = 8.dp, vertical = 8.dp))
+        Box(Modifier.size(40.dp).semantics { contentDescription = if (p.playing) "Playing" else "Paused" }, contentAlignment = Alignment.Center) {
+            Bars(moving = p.playing)
         }
     }
 }
