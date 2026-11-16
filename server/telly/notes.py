@@ -10,6 +10,7 @@ import time
 import urllib.parse
 import urllib.request
 
+from .genius import clean
 from .story import UA, _get, _plain, is_disambiguation, relevant  # noqa: F401  (UA kept for callers)
 from .textnorm import ntrack
 
@@ -164,7 +165,7 @@ Rules:
     out = llm.tool(system, user, TOOL, max_tokens=1800, timeout=90, retries=1, wait=10)
     got, usable = {}, 0
     for item in out.get('notes') or []:
-        n, note = item.get('n'), ' '.join(str(item.get('note') or '').split()).strip(' "')
+        n, note = item.get('n'), clean(item.get('note'))
         if isinstance(n, int) and 1 <= n <= len(todo):
             tid = todo[n - 1]['id']
             if 8 <= len(note) <= 240:

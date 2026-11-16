@@ -15,7 +15,15 @@ import club.taptappers.telly.data.Brief
 import club.taptappers.telly.data.CatalogInfo
 import club.taptappers.telly.data.Day
 import club.taptappers.telly.data.LibraryDay
+import club.taptappers.telly.data.LineNote
 import club.taptappers.telly.data.LogEntry
+import club.taptappers.telly.data.LyricLine
+import club.taptappers.telly.data.LyricsResult
+import club.taptappers.telly.data.Playing
+import club.taptappers.telly.data.SongRef
+import club.taptappers.telly.data.Spot
+import club.taptappers.telly.data.Trivia
+import club.taptappers.telly.data.WordsStatus
 import club.taptappers.telly.data.Remote
 import club.taptappers.telly.data.Service
 import club.taptappers.telly.data.Session
@@ -27,6 +35,9 @@ import club.taptappers.telly.ui.Composer
 import club.taptappers.telly.ui.Exchange
 import club.taptappers.telly.ui.ExchangeCard
 import club.taptappers.telly.ui.LibraryScreen
+import club.taptappers.telly.ui.LyricsInvite
+import club.taptappers.telly.ui.LyricsScreen
+import club.taptappers.telly.ui.MiniPlayer
 import club.taptappers.telly.ui.LocalEffects
 import club.taptappers.telly.ui.Phase
 import club.taptappers.telly.ui.PlaylistActions
@@ -134,7 +145,75 @@ class ScreenshotTest {
             ytm = Service(true, "you"), spotify = Service(true, "you")), false, null, { _, _ -> }, {})
     }
 
+    @Test
+    fun lyrics_singing() = shoot("10-lyrics-singing") {
+        LyricsScreen(rhapsody, rhapsodyWords, null, null, {}, {}, {}, {}, {}, {}, {}, null)
+    }
+
+    @Test
+    fun lyrics_opening_note() = shoot("11-lyrics-opening") {
+        LyricsScreen(rhapsody.copy(positionMs = 2_000), rhapsodyWords.copy(lines = rhapsodyWords.lines.map { it.copy(start = it.start + 9_000, end = it.end?.plus(9_000)) }),
+            null, Spot(run.copy(tracks = run.tracks.mapIndexed { i, t ->
+                if (i == 3) t.copy(title = "Bohemian Rhapsody", artist = "Queen", note = "You've played this 31 times; first in June 2019.") else t
+            }), 3), {}, {}, {}, {}, {}, {}, {}, null)
+    }
+
+    @Test
+    fun lyrics_finding() = shoot("12-lyrics-finding") {
+        LyricsScreen(rhapsody, null, null, null, {}, {}, {}, {}, {}, {}, {}, null)
+    }
+
+    @Test
+    fun lyrics_nothing_playing() = shoot("13-lyrics-nothing") {
+        LyricsScreen(null, null, null, null, {}, {}, {}, {}, {}, {}, {}, "6:30 pm run" to "https://music.youtube.com/watch?v=x&list=PLx")
+    }
+
+    @Test
+    fun today_playing() = shoot("14-today-playing") {
+        val haze = HazeState()
+        Box(Modifier.fillMaxSize()) {
+            Ambient(hourTint(17))
+            TodayScreen(Day("2026-11-16", "Monday, 16 November", true, "26°, partly cloudy", sessions = listOf(run, walk)), true, null, haze,
+                {}, {}, {}, {}, {}, {}, 162.dp)
+            Composer("", {}, "What's today?", false, {}, {}, haze, Modifier.align(Alignment.BottomCenter)) {
+                MiniPlayer(rhapsody, rhapsodyWords, {}, {}, haze, Modifier.padding(bottom = 10.dp))
+            }
+        }
+    }
+
+    @Test
+    fun today_invite() = shoot("15-today-invite") {
+        val haze = HazeState()
+        Box(Modifier.fillMaxSize()) {
+            Ambient(hourTint(17))
+            TodayScreen(Day("2026-11-16", "Monday, 16 November", true, "26°, partly cloudy", sessions = listOf(run)), true, null, haze,
+                {}, {}, {}, {}, {}, {}, 246.dp)
+            Composer("", {}, "What's today?", false, {}, {}, haze, Modifier.align(Alignment.BottomCenter)) {
+                LyricsInvite(false, {}, {}, {}, haze, Modifier.padding(bottom = 10.dp))
+            }
+        }
+    }
+
     companion object {
+        /** Paused 10.7 s in: the second line half sung (its words timed), a whisper beneath the first. */
+        val rhapsody = Playing("com.google.android.apps.youtube.music", "Bohemian Rhapsody", "Queen", "A Night at the Opera", 354_320,
+            playing = false, buffering = false, positionMs = 10_700, at = 0, speed = 1f)
+
+        val rhapsodyWords = LyricsResult(
+            song = SongRef("p121ce7db5300", "Bohemian Rhapsody", "Queen"), kind = "synced", version = "v1",
+            lines = listOf(
+                LyricLine(663, "Is this the real life? Is this just fantasy?", listOf(663, 903, 1303, 1683, 2523, 4383, 4603, 4963, 5363), 6243),
+                LyricLine(7663, "Caught in a landslide, no escape from reality", listOf(7663, 8343, 8643, 8863, 10623, 11103, 11783, 12183), 13803),
+                LyricLine(15243, "Open your eyes, look up to the skies and see", listOf(15243, 15883, 17343, 18203, 18763, 18983, 19463, 19683, 21383, 21683), 21883),
+                LyricLine(23500, "I'm just a poor boy, I need no sympathy", null, null),
+                LyricLine(28800, "Because I'm easy come, easy go", null, null),
+                LyricLine(31200, "Little high, little low", null, null),
+            ),
+            words = WordsStatus("ready", 42, 56),
+            trivia = Trivia("ready", listOf("It was the first single from A Night at the Opera, Queen's fourth album."),
+                listOf(LineNote(0, "It opens a cappella: Freddie's voice, layered into a choir.")), "https://genius.com/Queen-bohemian-rhapsody-lyrics"),
+        )
+
         private fun tr(n: Int, title: String, artist: String, pool: String, note: String? = null, pinned: Boolean = false) =
             Track(n, "$artist|$title", title, artist, pool, "", whyOf(pool), pool.startsWith("new"), pinned, null, 230, note = note)
 

@@ -62,6 +62,15 @@ import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.graphics.compositeOver
+import kotlin.math.PI
+import kotlin.math.abs
+import kotlin.math.sin
 import club.taptappers.telly.R
 import club.taptappers.telly.data.Session
 import club.taptappers.telly.data.Track
@@ -84,7 +93,9 @@ class PlaylistActions(
 
 @Composable
 fun PlaylistScreen(s: Session, working: String?, updating: Boolean, fresh: Set<String>, haze: HazeState, actions: PlaylistActions,
-                   bottomSpace: androidx.compose.ui.unit.Dp) {
+                   bottomSpace: androidx.compose.ui.unit.Dp,
+                   /** The song of this playlist the phone is playing (its index), and whether it is sounding. */
+                   playing: Pair<Int, Boolean>? = null) {
     val top = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
     val list = rememberLazyListState()
     val scrolled by remember { derivedStateOf { list.firstVisibleItemIndex > 0 || list.firstVisibleItemScrollOffset > 40 } }
@@ -108,7 +119,7 @@ fun PlaylistScreen(s: Session, working: String?, updating: Boolean, fresh: Set<S
                 }
             }
             itemsIndexed(s.tracks, key = { _, t -> t.id }) { i, t ->
-                TrackRow(t, accent, fresh = t.id in fresh, onClick = { sheet = i },
+                TrackRow(t, accent, fresh = t.id in fresh, playing = playing?.takeIf { it.first == i }?.second, onClick = { sheet = i },
                     modifier = Modifier.animateItem().graphicsLayer { alpha = listAlpha })
             }
             item(key = "notes") { LinerNotes(s) }
@@ -227,7 +238,7 @@ private fun Tweaks(s: Session, working: String?, actions: PlaylistActions) {
 }
 
 @Composable
-private fun TrackRow(t: Track, accent: Color, fresh: Boolean, onClick: () -> Unit, modifier: Modifier = Modifier) {
+private fun TrackRow(t: Track, accent: Color, fresh: Boolean, onClick: () -> Unit, modifier: Modifier = Modifier, playing: Boolean? = null) {
     // A song that just arrived glows for a moment, then settles: what changed is visible without a word.
     val glow by animateFloatAsState(if (fresh) 1f else 0f, tween(if (fresh) 300 else 1600), label = "fresh")
     Row(
@@ -235,11 +246,21 @@ private fun TrackRow(t: Track, accent: Color, fresh: Boolean, onClick: () -> Uni
             .clickable(onClickLabel = "Options for ${t.title}", onClick = onClick).padding(horizontal = 20.dp, vertical = 8.dp),
         verticalAlignment = Alignment.Top,
     ) {
-        Art(t.thumb, t.id, 52.dp, 8.dp)
+        Box {
+            Art(t.thumb, t.id, 52.dp, 8.dp)
+            // The song the phone is playing: bars over its cover, moving while it sounds.
+            if (playing != null) {
+                Box(Modifier.size(52.dp).clip(RoundedCornerShape(8.dp)).background(Color.Black.copy(alpha = 0.45f))
+                    .semantics { contentDescription = if (playing) "Playing now" else "Paused here" }, contentAlignment = Alignment.Center) {
+                    Bars(moving = playing)
+                }
+            }
+        }
         Spacer(Modifier.width(14.dp))
         Column(Modifier.weight(1f).padding(top = 3.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(t.title, style = T.bodyStrong, color = C.text, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+                Text(t.title, style = T.bodyStrong, color = if (playing != null) accent.copy(alpha = 0.98f).compositeOver(C.text) else C.text,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
                 if (t.pinned) {
                     Icon(painterResource(R.drawable.ic_pin), contentDescription = "Kept in place", tint = C.text3, modifier = Modifier.padding(start = 6.dp).size(14.dp))
                 }
@@ -252,6 +273,28 @@ private fun TrackRow(t: Track, accent: Color, fresh: Boolean, onClick: () -> Uni
                 Text(t.note.orEmpty(), style = T.caption, color = C.text.copy(alpha = 0.6f), maxLines = 3, overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.padding(top = 5.dp))
             }
+        }
+    }
+}
+
+/** Three bars rising and falling while the song sounds; at rest when it's paused (and with reduced motion). */
+@Composable
+private fun Bars(moving: Boolean) {
+    if (!moving || reducedMotion()) {
+        Row(horizontalArrangement = Arrangement.spacedBy(3.dp), verticalAlignment = Alignment.Bottom) {
+            listOf(0.55f, 0.9f, 0.4f).forEach { h -> Box(Modifier.width(3.dp).height(16.dp * h).clip(RoundedCornerShape(1.5.dp)).background(Color.White)) }
+        }
+        return
+    }
+    val t = rememberInfiniteTransition(label = "bars")
+    val phase by t.animateFloat(0f, 1f, infiniteRepeatable(tween(1100, easing = LinearEasing)), label = "phase")
+    Row(horizontalArrangement = Arrangement.spacedBy(3.dp), verticalAlignment = Alignment.Bottom) {
+        listOf(0f, 0.37f, 0.71f).forEach { off ->
+            // Read in the draw phase only: the bars move without recomposing the row.
+            Box(Modifier.width(3.dp).height(16.dp).graphicsLayer {
+                scaleY = 0.3f + 0.7f * abs(sin((phase + off) * PI.toFloat()))
+                transformOrigin = TransformOrigin(0.5f, 1f)
+            }.clip(RoundedCornerShape(1.5.dp)).background(Color.White))
         }
     }
 }

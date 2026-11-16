@@ -25,6 +25,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from .canvas import NoCatalog
 from .catalog import Catalog
 from .engine import TWEAKS
+from .lyrics import LyricsError, player_state
 from . import ytm as ytm_mod
 
 log = logging.getLogger('telly')
@@ -155,10 +156,11 @@ class Base:
 
 
 class PublicApp(Base):
-    def __init__(self, token, canvas, store, catalogs, limits=None):
+    def __init__(self, token, canvas, store, catalogs, limits=None, lyrics=None, genius=None):
         super().__init__(token, 'TELLY_TOKEN')
-        self.canvas, self.store, self.catalogs = canvas, store, catalogs
-        self.limits = limits or Limits(budgets={'prompt': 60, 'change': 600})
+        self.canvas, self.store, self.catalogs, self.lyrics, self.genius = canvas, store, catalogs, lyrics, genius
+        # `now` names a song to LeZeppLean, which fetches and times it (minutes of CPU): a leaked token mustn't spin that.
+        self.limits = limits or Limits(budgets={'prompt': 60, 'change': 600, 'now': 300, 'lyrics': 2400})
 
     def routes(self):
         return [
@@ -174,6 +176,8 @@ class PublicApp(Base):
             ('POST', r'/api/session/([0-9a-f]{10})/sync', self.resync, True, 'change'),
             ('DELETE', r'/api/session/([0-9a-f]{10})', self.delete, True, 'change'),
             ('GET', r'/api/library', self.library, True, None),
+            ('POST', r'/api/now', self.now, True, 'now'),
+            ('GET', r'/api/lyrics/([A-Za-z0-9_-]{1,64})', self.get_lyrics, True, 'lyrics'),
         ]
 
     def _day(self, d):
@@ -195,6 +199,7 @@ class PublicApp(Base):
         return 200, {
             'catalog': {'songs': cat.size, 'new': len(cat.candidates), 'built_at': int(cat.meta.get('built_at', 0))} if cat else None,
             'llm': self.canvas.llm.ready, 'today': self.canvas.place.today(), 'place': self.canvas.place.name,
+            'lyrics': bool(self.lyrics and self.lyrics.ready),
             'ytm': {k: v for k, v in (svc.get('ytm') or {'ok': False, 'error': 'not checked yet'}).items() if k in ('ok', 'account', 'error')},
             'spotify': {k: v for k, v in (svc.get('spotify') or {'ok': False, 'error': 'not checked yet'}).items() if k in ('ok', 'account', 'error')},
         }
@@ -260,6 +265,44 @@ class PublicApp(Base):
             return 404, {'error': 'no such playlist'}
         self.canvas.delete(m.group(1))
         return 200, {'ok': True}
+
+    # -- what's playing, and its lyrics ------------------------------------------------------------------------------
+    def now(self, m, q, body):
+        """The phone's player (what it plays, where in it) -> that song and its lyrics."""
+        if not (self.lyrics and self.lyrics.ready):
+            return 503, {'error': 'Lyrics are not set up on this server.'}
+        state = player_state(body)
+        if state is None:
+            return 400, {'error': 'title is required'}
+        try:
+            got = self.lyrics.now(state)
+        except LyricsError as e:
+            log.warning('lyrics: %s', str(e)[:160])
+            return 502, {'error': "Couldn't reach the lyrics service."}
+        return 200, self._dress(got, None)
+
+    def get_lyrics(self, m, q, body):
+        """A song's lyrics again, while its words are being timed. With ?known=<version> the lines are left out when
+        they haven't changed (they are most of the answer); the timing status and the notes always come."""
+        if not (self.lyrics and self.lyrics.ready):
+            return 503, {'error': 'Lyrics are not set up on this server.'}
+        try:
+            got = self.lyrics.lyrics(m.group(1))
+        except LyricsError as e:
+            log.warning('lyrics: %s', str(e)[:160])
+            return 502, {'error': "Couldn't reach the lyrics service."}
+        return 200, self._dress(got, (q.get('known') or [''])[0][:40] or None)
+
+    def _dress(self, got, known):
+        song = got.get('song') or {}
+        if self.genius and song.get('title'):
+            try:
+                got['trivia'] = self.genius.trivia(song['title'], song.get('artist') or '', got['lines'])
+            except Exception:
+                log.exception('genius notes for %s', song.get('id'))
+        if known and got.get('version') == known:
+            got = dict(got, lines=[], unchanged=True)
+        return got
 
     def library(self, m, q, body):
         before = (q.get('before') or [''])[0]

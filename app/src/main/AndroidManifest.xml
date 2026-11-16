@@ -33,5 +33,18 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- Android shows the music players' sessions (what's playing, where in it) only to an app the person has given
+             notification access; this service is what that access is granted to. telly never reads a notification, and
+             follows the player only while it is open. -->
+        <service
+            android:name=".data.NowPlayingListener"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
+        </service>
     </application>
 </manifest>

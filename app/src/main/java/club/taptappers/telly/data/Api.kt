@@ -23,7 +23,7 @@ import java.util.concurrent.TimeUnit
 val json = Json { ignoreUnknownKeys = true; explicitNulls = false; coerceInputValues = true }
 
 /** A failure worded for the person holding the phone, not for a log. */
-class TellyError(message: String) : Exception(message)
+class TellyError(message: String, val code: Int = 0) : Exception(message)
 
 /**
  * The server, from the phone. Every response is read AND decoded off the main thread (a day's JSON is tens of
@@ -57,6 +57,14 @@ class Api(private val prefs: Prefs) {
     suspend fun delete(id: String) {
         call { url -> Request.Builder().url(url("/api/session/$id")).delete().build() }
     }
+
+    /** What the phone is playing -> that song and its lyrics. */
+    suspend fun now(state: PlayerState): LyricsResult =
+        post("/api/now", json.encodeToJsonElement(PlayerState.serializer(), state) as JsonObject, LyricsResult.serializer())
+
+    /** A song's lyrics again; with `known`, the lines are left out when they haven't changed. */
+    suspend fun lyrics(songId: String, known: String?): LyricsResult =
+        get("/api/lyrics/$songId" + (known?.let { "?known=$it" } ?: ""), LyricsResult.serializer())
 
     private suspend fun <T> get(path: String, s: KSerializer<T>): T =
         decode(call { url -> Request.Builder().url(url(path)).get().build() }, s)
@@ -93,7 +101,7 @@ class Api(private val prefs: Prefs) {
                     r.isSuccessful -> body
                     r.code == 401 -> throw TellyError("The server didn't accept the token. Check it in Settings.")
                     r.code == 429 -> throw TellyError(errorOf(body) ?: "That's a lot of requests. Give it a few minutes.")
-                    r.code == 503 -> throw TellyError(errorOf(body) ?: "The server isn't ready yet.")
+                    r.code == 503 -> throw TellyError(errorOf(body) ?: "The server isn't ready yet.", 503)
                     else -> throw TellyError(errorOf(body) ?: "The server answered ${r.code}.")
                 }
             }
@@ -129,6 +137,11 @@ class Prefs(context: Context) {
         set(v) = p.edit().putString("token", v.trim()).apply()
 
     val configured: Boolean get() = token.isNotBlank()
+
+    /** The invitation to show lyrics for what's playing was turned down: it isn't offered again (Settings has it). */
+    var lyricsDeclined: Boolean
+        get() = p.getBoolean("lyrics_declined", false)
+        set(v) = p.edit().putBoolean("lyrics_declined", v).apply()
 
     /** The last day seen, so opening the app shows it at once, and still shows it offline. Read and written off the
      *  main thread. */

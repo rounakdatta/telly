@@ -122,6 +122,8 @@ fun SettingsScreen(
     error: String?,
     onConnect: (String, String) -> Unit,
     onBack: (() -> Unit)?,
+    canSeePlayer: Boolean = true,
+    onAllowPlayer: () -> Unit = {},
 ) {
     var srv by rememberSaveable { mutableStateOf(server) }
     var tok by rememberSaveable { mutableStateOf(token) }
@@ -150,7 +152,7 @@ fun SettingsScreen(
                 PrimaryPill(if (firstRun) "Connect" else "Save and check", null, onClick = { onConnect(srv, tok) }, busy = loading,
                     enabled = tok.isNotBlank(), modifier = Modifier.fillMaxWidth())
                 error?.let { Text(it, style = T.caption, color = C.problem, modifier = Modifier.padding(top = 12.dp)) }
-                status?.let { StatusCard(it) }
+                status?.let { StatusCard(it, canSeePlayer, onAllowPlayer) }
             }
         }
     }
@@ -177,13 +179,18 @@ private fun Field(label: String, value: String, onValue: (String) -> Unit, type:
 }
 
 @Composable
-private fun StatusCard(s: Status) {
+private fun StatusCard(s: Status, canSeePlayer: Boolean, onAllowPlayer: () -> Unit) {
     val n = NumberFormat.getIntegerInstance(Locale.getDefault())
     Column(Modifier.padding(top = 28.dp)) {
         Text("Connected", style = T.small, color = C.text3)
         StatusRow("YouTube Music", s.ytm.account?.let { "Signed in as $it" } ?: (s.ytm.error ?: "Not connected"), s.ytm.ok)
         StatusRow("Spotify", s.spotify.account?.let { "Signed in as $it" } ?: "Not connected yet", s.spotify.ok)
         StatusRow("Stories", if (s.llm) "Written by your Claude" else "Off: no language model configured", s.llm)
+        when {
+            !s.lyrics -> StatusRow("Words", "Off: the server has no lyrics service", false)
+            canSeePlayer -> StatusRow("Words", "Shown for what's playing, timed to every word", true)
+            else -> StatusRow("Words", "Off: telly can't see the music player yet", false, action = "Allow" to onAllowPlayer)
+        }
         s.catalog?.let { c ->
             val built = SimpleDateFormat("d MMM", Locale.getDefault()).format(Date(c.builtAt * 1000))
             StatusRow("Your music", "${n.format(c.songs)} songs you know, ${n.format(c.new)} new ones lined up (from $built)", true)
@@ -192,13 +199,17 @@ private fun StatusCard(s: Status) {
 }
 
 @Composable
-private fun StatusRow(name: String, detail: String, ok: Boolean) {
+private fun StatusRow(name: String, detail: String, ok: Boolean, action: Pair<String, () -> Unit>? = null) {
     Row(Modifier.fillMaxWidth().padding(top = 14.dp), verticalAlignment = Alignment.Top) {
         Box(Modifier.padding(top = 7.dp).size(7.dp).clip(RoundedCornerShape(4.dp)).background(if (ok) C.text else C.text3))
         Spacer(Modifier.width(12.dp))
-        Column {
+        Column(Modifier.weight(1f)) {
             Text(name, style = T.bodyStrong, color = C.text)
             Text(detail, style = T.caption, color = C.text2)
+        }
+        action?.let { (label, go) ->
+            Text(label, style = T.bodyStrong, color = C.text,
+                modifier = Modifier.clip(RoundedCornerShape(12.dp)).clickable(role = Role.Button, onClick = go).padding(horizontal = 8.dp, vertical = 4.dp))
         }
     }
 }
