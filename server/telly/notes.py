@@ -12,6 +12,7 @@ import urllib.parse
 import urllib.request
 
 from .genius import Genius, clean
+from .ground import _items, settle
 from .genius import Unreachable as GeniusUnreachable
 from .story import UA, _get, _plain, is_disambiguation, relevant  # noqa: F401  (UA kept for callers)
 from .textnorm import ntrack
@@ -93,7 +94,7 @@ def snippet(store, t):
     return fallback
 
 
-RULES = 2  # bump when the rules change: notes written under older ones are dropped once, and recent playlists rewritten
+RULES = 3  # bump when the rules change: notes written under older ones are dropped once, and recent playlists rewritten
 
 
 def migrate(store):
@@ -163,11 +164,14 @@ def _write_batch(llm, about, moment, todo, store, now, genius):
     snips, down = _snippets(store, todo)
     pages, gdown = _pages(genius, todo)
     down = down or gdown  # a song is only remembered as having nothing to say when every source was asked
-    lines, sourced = [], 0
+    lines, sourced, sources = [], 0, []
     for i, (t, sn, pg) in enumerate(zip(todo, snips, pages), 1):
         g = _genius_source(pg)
-        w = f'{sn[0]} article "{sn[1][0]}": {sn[1][1][:600]}' if sn else None
+        # Said outright when an article isn't about the song itself, for the writer and the checker alike.
+        w = (f'the song\'s own article "{sn[1][0]}": ' if sn[0] == 'song' else f'an article about the {sn[0]} "{sn[1][0]}", not about this song: ') \
+            + sn[1][1][:600] if sn else None
         sourced += bool(g or w)
+        sources.append(f'About the song "{t["title"]}" by {t["artist"]}. Genius: {g or "nothing"} Wikipedia: {w or "nothing"}')
         lines.append(f"[{i}] {t['title']} — {t['artist']}\n    Genius: {g or 'nothing'}\n    Wikipedia: {w or 'nothing'}")
     if not sourced:
         if not down:
@@ -195,7 +199,7 @@ Rules:
   all the notes. Vary how they begin."""
     out = llm.tool(system, user, TOOL, max_tokens=1800, timeout=90, retries=1, wait=10)
     got, usable = {}, 0
-    for item in out.get('notes') or []:
+    for item in _items(out.get('notes'), 'note'):
         n, note = item.get('n'), clean(item.get('note'))
         if isinstance(n, int) and 1 <= n <= len(todo):
             tid = todo[n - 1]['id']
@@ -206,6 +210,11 @@ Rules:
                 got.setdefault(tid, '')  # an essay or a scrap never replaces a good note for the same song
     if not usable:  # an empty or cut-off reply: remember nothing, so these are asked about again
         raise RuntimeError('the model wrote no usable notes')
+    # Read again, strictly, against each song's own sources: a note that says more than they do is rewritten once with
+    # the objection in hand, and if it still does, isn't said.
+    written = [(i, tid) for i, t in enumerate(todo) if (tid := t['id']) in got and got[tid]]
+    for (i, tid), note in zip(written, settle(llm, [(sources[i], got[tid]) for i, tid in written])):
+        got[tid] = note
     if not down:
         for t in todo:
             got.setdefault(t['id'], '')  # considered and passed over: don't ask again

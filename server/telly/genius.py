@@ -18,6 +18,7 @@ import urllib.parse
 import urllib.request
 from difflib import SequenceMatcher
 
+from .ground import _items, settle
 from .story import _plain
 from .textnorm import nartist, ntrack
 
@@ -27,7 +28,7 @@ BROWSER = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko
 KEEP_NONE = 14 * 86400   # "Genius has no page for it" is asked again after a fortnight
 RETRY = 15 * 60          # a failed look (network, the model) is tried again after this
 STALE = 30               # a song not asked about for this long (the phone asks every few seconds) was skipped past
-RULES = 3                # bump when the prompt's rules change: cached notes from older rules are written again
+RULES = 4                # bump when the prompt's rules change: cached notes from older rules are written again
 TOOL = {
     'name': 'trivia',
     'description': 'What a friend would say while this song plays.',
@@ -239,13 +240,20 @@ Rules:
 - Short and plain: "about" at most 24 words, "lines" at most 22. No hype words, no exclamation marks.
 - Don't open every one the same way, and don't address him by name."""
         out = self.llm.tool(system, user, TOOL, max_tokens=1500, timeout=90, retries=1, wait=10)
-        abouts = [clean(a) for a in (out.get('about') or [])]
-        lines = []
-        for item in out.get('lines') or []:
+        abouts = [a for a in (clean(a) for a in (out.get('about') or []) if isinstance(a, str)) if 8 <= len(a) <= 200][:3]
+        lines, bodies = [], []
+        for item in _items(out.get('lines')):
             n, text = item.get('n'), clean(item.get('text'))
             if isinstance(n, int) and 1 <= n <= len(refs) and 8 <= len(text) <= 170:
-                lines.append({'fragment': refs[n - 1]['fragment'], 'roman': clean(item.get('roman'))[:200] or None, 'text': text})
-        return {'about': [a for a in abouts if 8 <= len(a) <= 200][:3], 'refs': lines[:8]}
+                lines.append({'fragment': refs[n - 1]['fragment'], 'roman': clean(item.get('roman'))[:300] or None, 'text': text})
+                bodies.append(f"Annotation on the lines \"{' / '.join(x.strip() for x in refs[n - 1]['fragment'].splitlines() if x.strip())[:300]}\": "
+                              f"{refs[n - 1]['body']}")
+        lines = lines[:8]
+        # Read again, strictly, against exactly what each came from: whatever says more than its source isn't said.
+        song = f'About the song "{title}" by {artist}. ' + ' '.join(about.split())[:1400] + (' Connections: ' + ' | '.join(page['links']) if page['links'] else '')
+        said = settle(self.llm, [(song, a) for a in abouts] + [(b, x['text']) for b, x in zip(bodies, lines)], words=22)
+        return {'about': [a for a in said[:len(abouts)] if a],
+                'refs': [dict(x, text=t) for x, t in zip(lines, said[len(abouts):]) if t]}
 
     # -- the cache, and the look in the background ------------------------------------------------------------------
     @staticmethod
