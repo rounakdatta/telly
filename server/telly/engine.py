@@ -603,18 +603,15 @@ def why(t, now=None):
 
 
 def summary(brief, tracks):
+    """One short line about the shape: how familiar, what's new, and the arc."""
     n_new = sum(1 for t in tracks if str(t.get('pool', '')).startswith('new'))
     n_forgot = sum(1 for t in tracks if t.get('pool') == 'forgotten')
     e0, e1 = brief['energy']
-    arc = 'climbing to a long peak' if ACTIVITIES[brief['activity']].get('peak') else (
-        'gliding down' if e1 < e0 - 0.05 else ('building up' if e1 > e0 + 0.05 else 'steady'))
-    known = 'All songs you know' if n_new == 0 else ('Mostly songs you know' if n_new <= len(tracks) / 3 else 'Mostly new to you')
-    bits = [known]
-    if n_new:
-        bits.append(f'{n_new} new')
-    if n_forgot:
-        bits.append(f'{n_forgot} forgotten favourite{"s" if n_forgot > 1 else ""}')
-    return f"{', '.join(bits)}; {arc}."
+    arc = 'builds to a long peak' if ACTIVITIES[brief['activity']].get('peak') else (
+        'winds down' if e1 < e0 - 0.05 else ('builds up' if e1 > e0 + 0.05 else 'stays steady'))
+    known = 'All familiar' if n_new == 0 else ('Mostly familiar' if n_new <= len(tracks) / 3 else 'Mostly new to you')
+    bits = [known] + ([f'{n_new} new'] if n_new else []) + ([f'{n_forgot} forgotten favourite{"s" if n_forgot > 1 else ""}'] if n_forgot else [])
+    return f"{', '.join(bits)}. It {arc}."
 
 
 def duration_ms(tracks):

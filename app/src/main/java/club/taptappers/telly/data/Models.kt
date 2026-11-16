@@ -37,6 +37,9 @@ data class Session(
     val created: Double = 0.0,
     val updated: Double = 0.0,
 ) {
+    /** The title as shown: the planner writes them lowercase ("post-dinner walk"); a title starts with a capital. */
+    val name: String get() = title.replaceFirstChar { it.uppercaseChar() }
+
     /** Still settling: a playlist being written to a service, or a story being written. */
     val settling: Boolean
         get() = ytm.state in BUSY || spotify.state in BUSY || story.state in setOf("pending", "writing")

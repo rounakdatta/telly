@@ -107,15 +107,15 @@ fun SessionCard(s: Session, onOpen: () -> Unit, onPlay: (String) -> Unit, modifi
     val shape = RoundedCornerShape(24.dp)
     Row(
         modifier.padding(horizontal = 14.dp).fillMaxWidth().clip(shape).background(C.card).border(1.dp, C.hairline, shape)
-            .clickable(role = Role.Button, onClickLabel = "Open ${s.title}", onClick = onOpen).padding(12.dp),
+            .clickable(role = Role.Button, onClickLabel = "Open ${s.name}", onClick = onOpen).padding(12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Mosaic(s.tracks, 84.dp, 14.dp)
         Spacer(Modifier.width(14.dp))
         Column(Modifier.weight(1f)) {
-            Text(s.title, style = T.headline, color = C.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(s.name, style = T.headline, color = C.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Text(
-                listOfNotNull("${s.durationMin} min", "${s.count} songs", s.weather).joinToString(" · "),
+                "${s.durationMin} min · ${s.count} songs",
                 style = T.tabular, color = C.text2, maxLines = 1, overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.padding(top = 2.dp),
             )

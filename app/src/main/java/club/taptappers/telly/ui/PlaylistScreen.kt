@@ -3,6 +3,11 @@
 package club.taptappers.telly.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.draw.clip
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -91,7 +96,7 @@ fun PlaylistScreen(s: Session, working: String?, haze: HazeState, actions: Playl
             item(key = "notes") { LinerNotes(s) }
             item(key = "log") { History(s) }
         }
-        TopBar(s.title, scrolled, haze, actions)
+        TopBar(s.name, scrolled, haze, actions)
     }
 
     sheet?.let { i ->
@@ -129,7 +134,7 @@ private fun Hero(s: Session) {
     Column(Modifier.fillMaxWidth().padding(horizontal = 24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
         Mosaic(s.tracks, 212.dp, 20.dp)
         Spacer(Modifier.height(22.dp))
-        Text(s.title, style = T.title, color = C.text, textAlign = TextAlign.Center, modifier = Modifier.semantics { heading() })
+        Text(s.name, style = T.title, color = C.text, textAlign = TextAlign.Center, modifier = Modifier.semantics { heading() })
         Spacer(Modifier.height(6.dp))
         val time = s.startLabel?.takeIf { !s.title.contains(it, ignoreCase = true) }
         Text(listOfNotNull(time, "${s.durationMin} min", "${s.count} songs", s.weather).joinToString("  ·  "),
@@ -144,8 +149,11 @@ private fun PlayRow(s: Session, working: String?, actions: PlaylistActions) {
     Column(Modifier.fillMaxWidth().padding(top = 22.dp, start = 20.dp, end = 20.dp), horizontalAlignment = Alignment.CenterHorizontally) {
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             val ytm = s.ytm.url
-            PrimaryPill(if (ytm != null) "Play" else "Saving…", R.drawable.ic_ytmusic, onClick = { ytm?.let(actions.onOpenUrl) },
-                busy = ytm == null && s.ytm.state in setOf("pending", "syncing"), enabled = ytm != null)
+            if (ytm != null) {
+                PrimaryPill("Play", R.drawable.ic_ytmusic, onClick = { actions.onOpenUrl(ytm) })
+            } else if (s.ytm.state in setOf("pending", "syncing")) {
+                SavingPill()
+            }
             // Spotify only once it is there: a button for a service that isn't connected is chrome for nothing.
             s.spotify.url?.let { url -> GlassPill("Spotify", R.drawable.ic_spotify, onClick = { actions.onOpenUrl(url) }) }
         }
@@ -164,6 +172,19 @@ private fun PlayRow(s: Session, working: String?, actions: PlaylistActions) {
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun SavingPill() {
+    Row(
+        Modifier.height(48.dp).clip(RoundedCornerShape(24.dp)).background(C.glass).border(1.dp, C.hairline, RoundedCornerShape(24.dp))
+            .padding(horizontal = 20.dp).semantics { contentDescription = "Saving to YouTube Music" },
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        CircularProgressIndicator(Modifier.size(16.dp), color = C.text2, strokeWidth = 2.dp)
+        Spacer(Modifier.width(10.dp))
+        Text("Saving to YouTube Music", style = T.bodyStrong, color = C.text2, maxLines = 1)
     }
 }
 

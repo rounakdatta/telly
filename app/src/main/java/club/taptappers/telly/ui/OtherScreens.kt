@@ -91,13 +91,13 @@ fun LibraryScreen(days: List<LibraryDay>, loaded: Boolean, onBack: () -> Unit, o
 @Composable
 private fun LibraryRow(s: Session, onClick: () -> Unit) {
     Row(
-        Modifier.fillMaxWidth().clickable(role = Role.Button, onClickLabel = "Open ${s.title}", onClick = onClick).padding(horizontal = 22.dp, vertical = 8.dp),
+        Modifier.fillMaxWidth().clickable(role = Role.Button, onClickLabel = "Open ${s.name}", onClick = onClick).padding(horizontal = 22.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Mosaic(s.tracks, 56.dp, 10.dp)
         Spacer(Modifier.width(14.dp))
         Column(Modifier.weight(1f)) {
-            Text(s.title, style = T.bodyStrong, color = C.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(s.name, style = T.bodyStrong, color = C.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Text("${s.durationMin} min · ${s.count} songs" + (s.story.title?.let { " · $it" } ?: ""), style = T.tabular, color = C.text2,
                 maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
