@@ -35,8 +35,8 @@
         </activity>
 
         <!-- Android shows the music players' sessions (what's playing, where in it) only to an app the person has given
-             notification access; this service is what that access is granted to. telly never reads a notification, and
-             follows the player only while it is open. -->
+             notification access; this service is what that access is granted to. Android keeps it bound while access
+             is on, but it does nothing: telly never reads a notification, and follows the player only while open. -->
         <service
             android:name=".data.NowPlayingListener"
             android:exported="true"

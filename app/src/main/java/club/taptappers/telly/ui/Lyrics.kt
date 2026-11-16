@@ -64,7 +64,10 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.semantics.ProgressBarRangeInfo
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.progressBarRangeInfo
+import androidx.compose.ui.semantics.setProgress
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.SpanStyle
@@ -121,12 +124,15 @@ fun shape(lines: List<LyricLine>, durationMs: Long?, whispers: Map<Int, String> 
     if (first >= 6000 || opening != null) out += Shown(0, first, "", emptyList(), gap = first >= 6000, say = opening)
     sung.forEachIndexed { k, (src, line) ->
         val next = sung.getOrNull(k + 1)?.value?.start
-        val end = line.end ?: next ?: (durationMs ?: (line.start + 5000))
+        // A line ends where the next line of the lyrics starts, sung or not (a blank one marks an instrumental break),
+        // and the last one a few seconds on, not at the end of the outro.
+        val following = lines.getOrNull(src + 1)?.start?.takeIf { it > line.start }
+        val end = line.end ?: following ?: minOf(durationMs ?: Long.MAX_VALUE, line.start + 6000)
         val texts = line.text.split(' ').filter { it.isNotEmpty() }
         val starts = line.words?.takeIf { it.size == texts.size }
         val words = if (starts != null) texts.zip(starts) else {
             // spread across ~85% of the line: singers rarely sing right up to the next line's first word
-            val span = ((minOf(end, next ?: end) - line.start) * 0.85).toLong().coerceAtLeast(400)
+            val span = ((end - line.start) * 0.85).toLong().coerceAtLeast(400)
             val total = texts.sumOf { it.length + 1 }.coerceAtLeast(1)
             var acc = 0
             texts.map { w -> (w to (line.start + span * acc / total)).also { acc += w.length + 1 } }
@@ -180,7 +186,10 @@ fun LyricsScreen(
     // frame, so tests and the system's animation policy can hold it.)
     val pos = remember { mutableLongStateOf(playing?.position() ?: 0L) }
     LaunchedEffect(playing) {
-        while (true) withInfiniteAnimationFrameMillis { pos.longValue = playing?.position() ?: 0L }
+        pos.longValue = playing?.position() ?: 0L
+        val p = playing
+        if (p == null || !p.playing) return@LaunchedEffect // paused: nothing moves, so no frame is asked for
+        while (true) withInfiniteAnimationFrameMillis { pos.longValue = p.position() }
     }
     val note = spot?.track?.note
     val shown = rememberShown(playing, lyrics, note)
@@ -212,8 +221,10 @@ fun LyricsScreen(
 @Composable
 private fun Header(p: Playing?, spot: Spot?, onClose: () -> Unit) {
     Row(Modifier.fillMaxWidth().padding(start = 20.dp, end = 14.dp, top = 12.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-        Cover(p, 52.dp, 10.dp)
-        Spacer(Modifier.width(14.dp))
+        if (p != null) {
+            Cover(p, 52.dp, 10.dp)
+            Spacer(Modifier.width(14.dp))
+        }
         Column(Modifier.weight(1f)) {
             Text(p?.title ?: "Nothing playing", style = T.bodyStrong, color = C.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
             if (p != null) Text(p.artist, style = T.caption, color = C.text2, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -254,7 +265,7 @@ private fun Unsung(l: LyricsResult?, error: String?, note: String?, onRetry: () 
     Column(Modifier.fillMaxSize().padding(horizontal = 24.dp, vertical = 20.dp)) {
         val says = listOfNotNull(note) + l?.trivia?.about.orEmpty()
         when {
-            error != null && l == null -> {
+            error != null -> {
                 Text(error, style = T.body, color = C.text2)
                 Spacer(Modifier.height(12.dp))
                 Text("Try again", style = T.bodyStrong, color = C.text,
@@ -427,6 +438,8 @@ private fun Breathing() {
 private fun Controls(p: Playing, pos: () -> Long, onSeek: (Long) -> Unit, onPlayPause: () -> Unit, onNext: () -> Unit, onPrevious: () -> Unit) {
     val dur = p.durationMs ?: 0L
     val view = LocalView.current
+    // Elapsed and remaining (and what TalkBack reads), redrawn once a second rather than every frame.
+    val second by remember { derivedStateOf { pos() / 1000 } }
     Column(Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 12.dp)) {
         // Progress, read in the draw phase only; a tap on it seeks there.
         Box(Modifier.fillMaxWidth().height(24.dp).pointerInput(dur) {
@@ -434,7 +447,13 @@ private fun Controls(p: Playing, pos: () -> Long, onSeek: (Long) -> Unit, onPlay
                 view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
                 onSeek((o.x / size.width * dur).toLong().coerceIn(0, dur))
             }
-        }.semantics { contentDescription = "Seek" }, contentAlignment = Alignment.Center) {
+        }.semantics {
+            contentDescription = "Position in the song"
+            if (dur > 0) {
+                progressBarRangeInfo = ProgressBarRangeInfo((second * 1000f / dur).coerceIn(0f, 1f), 0f..1f)
+                setProgress("Seek") { f -> onSeek((f * dur).toLong().coerceIn(0, dur)); true }
+            }
+        }, contentAlignment = Alignment.Center) {
             Box(Modifier.fillMaxWidth().height(3.dp).clip(RoundedCornerShape(2.dp)).background(C.glass)) {
                 Box(Modifier.fillMaxHeight().fillMaxWidth().graphicsLayer {
                     scaleX = if (dur > 0) (pos().toFloat() / dur).coerceIn(0f, 1f) else 0f
@@ -442,8 +461,6 @@ private fun Controls(p: Playing, pos: () -> Long, onSeek: (Long) -> Unit, onPlay
                 }.background(C.text.copy(alpha = 0.85f)))
             }
         }
-        // Elapsed and remaining, redrawn once a second rather than every frame.
-        val second by remember { derivedStateOf { pos() / 1000 } }
         Row(Modifier.fillMaxWidth()) {
             Text(clock(second), style = T.tabular, color = C.text3)
             Spacer(Modifier.weight(1f))

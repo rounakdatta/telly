@@ -35,7 +35,10 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.foundation.layout.Column
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import club.taptappers.telly.data.NowPlayingListener
@@ -118,8 +121,11 @@ fun App(model: TellyModel) {
     }
     val miniShown = st.playing != null && ex == null
     val inviteShown = st.playing == null && ex == null && st.offerLyrics && st.top == Screen.Today
-    // Room under the lists for the composer and whatever sits on it, so the last song can scroll clear of them.
-    val composerSpace = 96.dp + (if (miniShown) 66.dp else 0.dp) + (if (inviteShown) 150.dp else 0.dp)
+    // Room under the lists for the composer and what sits on it (the player, or the invitation), measured rather than
+    // guessed: the invitation is taller on a narrow phone, and taller again when it explains a restricted setting.
+    val density = LocalDensity.current
+    var onComposer by remember { mutableStateOf(0.dp) }
+    val composerSpace = 96.dp + onComposer
 
     Box(Modifier.fillMaxSize()) {
         AnimatedContent(
@@ -206,19 +212,21 @@ fun App(model: TellyModel) {
                                 onDismiss = { model.dismissExchange(e.id) }, modifier = Modifier.padding(bottom = 10.dp))
                         }
                     }
-                    // What's playing, while nothing is being said (the exchange has the floor while it lasts).
-                    AnimatedVisibility(visible = miniShown, enter = fadeIn(tween(220)) + expandVertically(tween(260)),
-                        exit = fadeOut(tween(180)) + shrinkVertically(tween(220))) {
-                        val lastPlaying = remember { arrayOfNulls<Playing>(1) }
-                        st.playing?.let { lastPlaying[0] = it }
-                        (st.playing ?: lastPlaying[0])?.let { p ->
-                            MiniPlayer(p, st.lyrics, onOpen = { model.open(Screen.Lyrics) }, onPlayPause = model::playPause, haze = haze,
+                    Column(Modifier.onSizeChanged { onComposer = with(density) { it.height.toDp() } }) {
+                        // What's playing, while nothing is being said (the exchange has the floor while it lasts).
+                        AnimatedVisibility(visible = miniShown, enter = fadeIn(tween(220)) + expandVertically(tween(260)),
+                            exit = fadeOut(tween(180)) + shrinkVertically(tween(220))) {
+                            val lastPlaying = remember { arrayOfNulls<Playing>(1) }
+                            st.playing?.let { lastPlaying[0] = it }
+                            (st.playing ?: lastPlaying[0])?.let { p ->
+                                MiniPlayer(p, st.lyrics, onOpen = { model.open(Screen.Lyrics) }, onPlayPause = model::playPause, haze = haze,
+                                    modifier = Modifier.padding(bottom = 10.dp))
+                            }
+                        }
+                        AnimatedVisibility(visible = inviteShown, enter = fadeIn(tween(220)), exit = fadeOut(tween(180)) + shrinkVertically(tween(220))) {
+                            LyricsInvite(st.lyricsStuck, onAllow = allowPlayer, onAppInfo = appInfo, onDecline = model::declineLyrics, haze = haze,
                                 modifier = Modifier.padding(bottom = 10.dp))
                         }
-                    }
-                    AnimatedVisibility(visible = inviteShown, enter = fadeIn(tween(220)), exit = fadeOut(tween(180)) + shrinkVertically(tween(220))) {
-                        LyricsInvite(st.lyricsStuck, onAllow = allowPlayer, onAppInfo = appInfo, onDecline = model::declineLyrics, haze = haze,
-                            modifier = Modifier.padding(bottom = 10.dp))
                     }
                 },
             )

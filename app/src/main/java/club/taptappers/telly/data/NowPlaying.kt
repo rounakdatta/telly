@@ -72,7 +72,11 @@ class NowPlaying(private val context: Context) {
     private val sessionsChanged = MediaSessionManager.OnActiveSessionsChangedListener { follow(it.orEmpty()) }
 
     fun start() {
-        if (manager != null || !hasAccess()) return
+        if (!hasAccess()) {
+            _playing.value = null // access withdrawn while telly was away
+            return
+        }
+        if (manager != null) return
         val m = context.getSystemService(MediaSessionManager::class.java) ?: return
         try {
             m.addOnActiveSessionsChangedListener(sessionsChanged, component)
@@ -84,10 +88,15 @@ class NowPlaying(private val context: Context) {
         }
     }
 
+    /** Stop listening. What was playing is kept as it was: back in telly, the same song and its words show at once,
+     *  and catch up the moment the player answers (clearing it made every return start from "Finding the words"). */
     fun stop() {
         runCatching { manager?.removeOnActiveSessionsChangedListener(sessionsChanged) }
         manager = null
-        follow(emptyList())
+        followed.values.forEach { (c, cb) -> c.unregisterCallback(cb) }
+        followed.clear()
+        order = emptyList()
+        current = null
     }
 
     /** Listen to every player, not just the one shown: the one to show changes without the list changing (Spotify
@@ -170,7 +179,9 @@ private val NOT_WORD = Regex("""[^\p{L}\p{N}]+""")
 fun songKey(title: String): String = Normalizer.normalize(title.lowercase(), Normalizer.Form.NFKD).replace(MARKS, "")
     .replace(BRACKETS, "").replace(DASH_TAIL, "").replace(FEAT, "").replace(NOT_WORD, " ").trim()
 
-private fun artistWords(artist: String): Set<String> = songKey(artist).split(' ').filter { it.length >= 3 }.toSet()
+private val NOT_NAMES = setOf("the", "and", "feat", "with", "los", "las", "les", "der", "die", "das")
+
+private fun artistWords(artist: String): Set<String> = songKey(artist).split(' ').filter { it.length >= 3 && it !in NOT_NAMES }.toSet()
 
 /**
  * The playlist and place of the song playing, looking in `sessions` in order (the open playlist first): the same
@@ -180,10 +191,13 @@ fun locate(p: Playing?, sessions: List<Session>): Spot? {
     if (p == null) return null
     val name = songKey(p.title).ifEmpty { return null }
     val artists = artistWords(p.artist)
+    val artist = songKey(p.artist)
     for (s in sessions) {
         s.tracks.forEachIndexed { i, t ->
-            if (songKey(t.title) == name && (artists.isEmpty() || artistWords(t.artist).any { it in artists } ||
-                    (p.durationMs != null && t.durationS > 0 && abs(p.durationMs / 1000 - t.durationS) <= 3))) return Spot(s, i)
+            // "U2" or "MØ" have no word long enough to compare: then the whole name must match.
+            val sameArtist = artistWords(t.artist).any { it in artists } || (artist.isNotEmpty() && songKey(t.artist) == artist)
+            val sameLength = p.durationMs != null && t.durationS > 0 && abs(p.durationMs / 1000 - t.durationS) <= 3
+            if (songKey(t.title) == name && (sameArtist || sameLength)) return Spot(s, i)
         }
     }
     return null

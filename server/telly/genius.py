@@ -14,7 +14,6 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor
 from difflib import SequenceMatcher
 
 from .story import _plain
@@ -25,6 +24,7 @@ log = logging.getLogger('telly.genius')
 BROWSER = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36'
 KEEP_NONE = 14 * 86400   # "Genius has no page for it" is asked again after a fortnight
 RETRY = 15 * 60          # a failed look (network, the model) is tried again after this
+STALE = 30               # a song not asked about for this long (the phone asks every few seconds) was skipped past
 TOOL = {
     'name': 'trivia',
     'description': 'What a friend would say while this song plays.',
@@ -85,9 +85,11 @@ def place(refs, lines):
     plain = [_plain(l.get('text') or '') for l in lines]
     out, used = [], set()
     for ref in refs:
-        first = next((x for x in (ref.get('fragment') or '').split('\n') if x.strip()), '')
-        # The fragment as written, and in Latin letters (lyrics in Hindi or Bengali are shown romanised).
-        tries = [f for f in (_plain(re.sub(r'\[[^\]]*\]', '', first)), _plain(ref.get('roman') or '')) if len(f) >= 6]
+        # Its first sung line ("[Verse 1]\nMama, just killed a man" begins at "Mama"), as written and in Latin letters
+        # (lyrics in Hindi or Bengali are shown romanised).
+        bare = re.sub(r'\[[^\]]*\]', '', ref.get('fragment') or '')
+        first = next((x for x in bare.split('\n') if _plain(x)), '')
+        tries = [f for f in (_plain(first), _plain(ref.get('roman') or '')) if len(f) >= 6]
         hit = next((i for f in tries for i, l in enumerate(plain) if l and i not in used and _same_line(f, l)), None)
         if hit is not None:
             used.add(hit)
@@ -104,9 +106,11 @@ def _same_line(f, l):
 class Genius:
     def __init__(self, store, llm, token=''):
         self.store, self.llm, self.token = store, llm, token or ''
-        self.pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix='genius')  # one look at a time: polite
-        self.busy, self.failed = set(), {}
-        self.lock = threading.Lock()
+        # One look at a time (polite to Genius and the model), the song asked about most recently first: skipping
+        # through ten songs mustn't leave the one playing waiting behind nine lookups nobody will read.
+        self.waiting, self.asked, self.failed, self.working = {}, {}, {}, None
+        self.cv = threading.Condition()
+        self.thread = None
 
     # -- reading -------------------------------------------------------------------------------------------------------
     def _get(self, path, **params):
@@ -203,6 +207,23 @@ Rules:
     def key(title, artist):
         return f'genius:{nartist(first_artist(artist))}|{ntrack(title)}'
 
+    def _run(self):
+        while True:
+            with self.cv:
+                while not self.waiting:
+                    self.cv.wait()
+                k = max(self.waiting, key=lambda x: self.asked.get(x, 0))
+                title, artist = self.waiting.pop(k)
+                if time.time() - self.asked.get(k, 0) > STALE:
+                    continue  # skipped past: looked up the next time it plays
+                self.working = k
+            try:
+                self._work(k, title, artist)
+            finally:
+                with self.cv:
+                    self.working = None
+                    self.cv.notify_all()
+
     def _work(self, k, title, artist):
         try:
             page = self.look(title, artist)
@@ -213,11 +234,13 @@ Rules:
             self.store.put(k, {'url': page['url'], **got, 'ts': time.time()})
         except Exception as e:  # Genius or the model couldn't be asked: nothing is kept, and it's tried again later
             log.warning('genius: %s by %s: %s', title, artist, str(e)[:160])
-            with self.lock:
+            with self.cv:
                 self.failed[k] = time.time() + RETRY
-        finally:
-            with self.lock:
-                self.busy.discard(k)
+
+    def idle(self, timeout=10):
+        """Wait until nothing is waiting or being looked up (tests)."""
+        with self.cv:
+            return self.cv.wait_for(lambda: not self.waiting and self.working is None, timeout)
 
     def trivia(self, title, artist, lines):
         """What there is to say about this song, placed on these lines; starts the look when there's nothing yet.
@@ -228,10 +251,16 @@ Rules:
             if got.get('none'):
                 return {'status': 'none', 'about': [], 'lines': []}
             return {'status': 'ready', 'about': got.get('about') or [], 'lines': place(got.get('refs') or [], lines), 'url': got.get('url')}
-        with self.lock:
+        with self.cv:
             if self.failed.get(k, 0) > time.time():
                 return {'status': 'none', 'about': [], 'lines': []}
-            if k not in self.busy:
-                self.busy.add(k)
-                self.pool.submit(self._work, k, title, artist)
+            self.asked[k] = time.time()
+            if len(self.asked) > 500:  # forget songs asked about long ago
+                self.asked = {x: t for x, t in self.asked.items() if time.time() - t < 3600}
+            if k != self.working:
+                self.waiting[k] = (title, artist)
+                self.cv.notify_all()
+            if self.thread is None:
+                self.thread = threading.Thread(target=self._run, daemon=True, name='genius')
+                self.thread.start()
         return {'status': 'pending', 'about': [], 'lines': []}

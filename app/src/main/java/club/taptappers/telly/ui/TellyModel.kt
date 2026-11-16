@@ -405,7 +405,10 @@ class TellyModel(app: Application) : AndroidViewModel(app) {
     private suspend fun follow(p: Playing) {
         delay(700)
         var got: LyricsResult? = null
-        var tries = 0
+        var errors = 0 // in a row: one success forgives the rest
+        var unnamed = 0 // answers that couldn't yet say which song this is
+        var polls = 0
+        val giveUp = { why: String? -> _state.update { if (it.playing?.key == p.key) it.copy(lyricsError = why) else it } }
         while (true) {
             while (!foreground) delay(1000)
             val id = got?.song?.id
@@ -413,19 +416,17 @@ class TellyModel(app: Application) : AndroidViewModel(app) {
                 if (id == null) api.now((_state.value.playing?.takeIf { it.key == p.key } ?: p).report())
                 else api.lyrics(id, got?.version).let { n -> if (n.unchanged) n.copy(lines = got?.lines.orEmpty(), unchanged = false) else n }
             } catch (e: TellyError) {
-                tries++
-                if (e.code == 503 || tries >= 4) {
-                    _state.update { if (it.playing?.key == p.key) it.copy(lyricsError = e.message) else it }
-                    return
-                }
-                delay(3000L * tries)
+                if (e.code == 503 || ++errors >= 4) return giveUp(e.message)
+                delay(3000L * errors)
                 continue
             }
+            errors = 0
             got = r
             _state.update { if (it.playing?.key == p.key) it.copy(lyrics = r, lyricsError = null) else it }
             if (!r.settling) return
-            if (r.song?.id == null && ++tries > 8) return // never worked out which song this is
-            delay(if (r.song?.id == null) 1500 else 3500)
+            if (r.song?.id == null && ++unnamed > 8) return giveUp("Couldn't work out which song this is.")
+            // Timing a song's words takes a minute or two; past that, something is stuck, so ask less often.
+            delay(if (r.song?.id == null) 1500 else if (++polls > 35) 10_000 else 3500)
         }
     }
 

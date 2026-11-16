@@ -103,6 +103,31 @@ class GeniusTest(unittest.TestCase):
                 {'fragment': 'Is this the real life? Is this just fantasy?', 'text': 'D'},
                 {'fragment': 'Something else entirely, never sung', 'text': 'E'}]
         self.assertEqual([{'line': 0, 'text': 'D'}, {'line': 2, 'text': 'A'}, {'line': 3, 'text': 'C'}], place(refs, lines))
+        # a fragment that begins with its section's name begins at its first sung line
+        self.assertEqual([{'line': 2, 'text': 'F'}], place([{'fragment': '[Verse 1]\nMama, just killed a man', 'text': 'F'}], lines))
+
+    def test_the_song_playing_is_looked_up_first_and_skipped_ones_are_let_go(self):
+        import telly.genius as G
+        order = []
+        kv = type('KV', (), {'get': lambda s, k, d=None: None, 'put': lambda s, k, v: None})()
+
+        class Slow(FakeGenius):
+            def look(self, title, artist):
+                order.append(title)
+                time.sleep(0.2)
+                return None
+        g = Slow(kv, None)
+        g.trivia('First', 'A', [])          # starts at once
+        deadline = time.time() + 5
+        while g.working != G.Genius.key('First', 'A') and time.time() < deadline:
+            time.sleep(0.01)
+        g.trivia('Skipped', 'B', [])        # waits...
+        g.asked[G.Genius.key('Skipped', 'B')] -= 60  # ...and nobody has asked about it for a minute
+        g.trivia('Playing now', 'C', [])    # the newest
+        g.trivia('Older', 'D', [])
+        g.asked[G.Genius.key('Older', 'D')] -= 5
+        self.assertTrue(g.idle())
+        self.assertEqual(['First', 'Playing now', 'Older'], order)
 
     def test_the_song_itself_not_a_translation_or_a_namesake(self):
         hit = lambda i, t, a, views: {'type': 'song', 'result': {'id': i, 'title': t, 'artist_names': a, 'primary_artist': {'name': a},
@@ -123,7 +148,7 @@ class GeniusTest(unittest.TestCase):
         FakeGenius.looks = 0
         lines = [{'text': 'Is this the real life?'}, {'text': 'Is this just fantasy?'}]
         self.assertEqual('pending', g.trivia('Bohemian Rhapsody', 'Queen', lines)['status'])
-        g.pool.shutdown(wait=True)
+        self.assertTrue(g.idle())
         got = g.trivia('Bohemian Rhapsody - Remastered 2011', 'Queen', lines)
         self.assertEqual('ready', got['status'], 'the same song under a remaster title is the same page')
         self.assertEqual([{'line': 1, 'text': 'The ballad section begins with this question.'}], got['lines'])
@@ -171,7 +196,7 @@ class NowApiTest(Base):
         self.assertEqual({'start': 1200, 'text': 'Is this the real life?', 'words': [1200, 1500, 1800, 2300, 2600], 'end': 4000}, got['lines'][0])
         self.assertIsNone(got['lines'][1]['words'], 'a line the aligner is unsure of is timed by the line')
         self.assertEqual('pending', got['trivia']['status'])
-        self.genius.pool.shutdown(wait=True)
+        self.assertTrue(self.genius.idle())
         code, again = self.req('GET', '/api/lyrics/p0123456789ab?known=v1')
         self.assertEqual((200, [], True), (code, again['lines'], again['unchanged']), 'lines the phone has are not sent again')
         self.assertEqual([{'line': 1, 'text': 'The ballad section begins with this question.'}], again['trivia']['lines'])
