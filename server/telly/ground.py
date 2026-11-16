@@ -82,7 +82,7 @@ def supported(llm, pairs, limit=1500, opinions=False):
     return [ok for ok, _ in check(llm, pairs, limit, opinions)]
 
 
-def settle(llm, pairs, words=26, limit=1500, opinions=False):
+def settle(llm, pairs, words=26, limit=1500, opinions=False, form=''):
     """[(source, claim)] -> the claims to say: each one checked against its source; one that says more than its source
     is rewritten once with the checker's objection in hand and checked again; whatever still isn't supported becomes ''.
     """
@@ -97,7 +97,7 @@ def settle(llm, pairs, words=26, limit=1500, opinions=False):
 
 Each claim above says something its source doesn't (the problem is given). Rewrite it so that everything it says is
 stated in its source: the same purpose, warm and plain, at most {words} words. No causes, readings or numbers the source
-doesn't give. If the source has nothing as good to say, return it empty."""
+doesn't give. {form}If the source has nothing as good to say, return it empty."""
     out = llm.tool('You write short, exact notes about songs for a music app.', user, REWRITE, max_tokens=1200, timeout=90, retries=1, wait=10)
     redo = {}
     for item in _items(out.get('rewrites')):
