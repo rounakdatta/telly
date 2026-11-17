@@ -34,7 +34,9 @@ from .textnorm import nartist, ntrack
 
 log = logging.getLogger('telly.compose')
 
-EFFORT = 'max'
+# The same moment (a 15-minute walk) took 29 minutes at max effort and 11 at xhigh, with mixes as good as each
+# other: xhigh, so a mix asked for now arrives while it can still be used. TELLY_COMPOSER_EFFORT=max for the other.
+EFFORT = 'xhigh'
 MAX_TURNS = 80
 KEEP = 30 * 86400
 UA = 'telly/3 (personal playlist app; github.com/rounakdatta/telly)'

@@ -99,7 +99,7 @@ class ComposerTest(Base):
         self.assertIn('never played anything by Joni Mitchell', results['h1'])
         self.assertEqual([r['tool'] for r in res['log']], ['find_recording', 'find_recording', 'history'])
         body = llm.bodies[0]
-        self.assertEqual(body['output_config'], {'effort': 'max'})
+        self.assertEqual(body['output_config'], {'effort': C.EFFORT})
         self.assertEqual(body['thinking'], {'type': 'adaptive'})
         self.assertNotIn('tool_choice', body)  # Opus 5.5 refuses forced tool use
         self.assertIn('<mix>…</mix>', body['system'][0]['text'])  # the mixes he loved are the standard it's shown
