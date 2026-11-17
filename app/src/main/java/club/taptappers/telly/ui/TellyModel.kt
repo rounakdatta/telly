@@ -118,7 +118,13 @@ class TellyModel(app: Application) : AndroidViewModel(app) {
 
     fun back() {
         _state.update { if (it.stack.size > 1) it.copy(stack = it.stack.dropLast(1)) else it }
-        if (_state.value.top == Screen.Today) refreshDay()
+        // Back on a playlist (from the lyrics, say), it is looked at again: a mix may have arrived meanwhile, and the
+        // poll that was following it stopped when it went off screen.
+        when (val top = _state.value.top) {
+            Screen.Today -> refreshDay()
+            is Screen.Playlist -> refreshSession(top.id)
+            else -> Unit
+        }
     }
 
     fun setForeground(on: Boolean) {

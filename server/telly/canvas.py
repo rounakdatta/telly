@@ -42,44 +42,46 @@ class Canvas:
         # Makes the mix and its story the way a friend would (compose.py), in the background: when there is one, every
         # new mix and every change to one is composed; the curator and the engine are what's left without it.
         self.composer_llm = composer_llm
+        self.composer_effort = compose.EFFORT
         self.lock = threading.RLock()
 
     @property
     def composing(self):
         return self.composer_llm is not None and self.composer_llm.ready
 
-    def compose(self, s, j, progress):
+    def compose(self, s, j, progress, alive=lambda: True):
         """Make the mix a job asks for (in the worker; minutes) -> (result, research)."""
         cat = self.cat
         v = self.store.version(s['id'])
         b = v['brief']
         research = compose.Research(cat, self.store)
-        composer = compose.Composer(self.composer_llm, research, about=self.about, examples=cat.meta.get('examples') or '')
+        pinned = [t for t in v['tracks'] if t.get('pinned')]
+        composer = compose.Composer(self.composer_llm, research, about=self.about, examples=cat.meta.get('examples') or '',
+                                    effort=self.composer_effort, keep=[(t['artist'], t['title']) for t in pinned])
         day = s['day']
-        current = None
-        if j.get('instruction') and v['tracks']:
-            current = {'title': (b.get('mix') or {}).get('title'), 'songs': [
-                dict(t, pinned=t.get('pinned') or any(k.get('pinned') and k.get('id') == t['id'] for k in j.get('keep') or []))
-                for t in v['tracks']]}
+        current = {'title': (b.get('mix') or {}).get('title'), 'songs': v['tracks']} if j.get('instruction') and v['tracks'] else None
         text = compose.brief(self.about, self.moment(day, b, s['title']), (b.get('mix') or {}).get('said') or j.get('said'),
                              self.store.lens(day), b['minutes'], time.strftime('%A %-d %B %Y', time.strptime(day, '%Y-%m-%d')),
                              json.loads(cat.meta.get('top_ever') or '[]'), json.loads(cat.meta.get('top_year') or '[]'),
-                             compose.recent(self.store, day, exclude=s['id']), current=current, instruction=j.get('instruction'))
-        return composer.make(text, b['minutes'], progress=progress), research
+                             compose.recent(self.store, day, exclude=s['id']), current=current, instruction=j.get('instruction'),
+                             rules=rules_of(b))
+        return composer.make(text, b['minutes'], progress=progress, alive=alive), research
 
     def save_composed(self, sid, j, res, research):
         """A finished mix becomes the playlist's next version, its story kept alongside (per version, like the notes)."""
         mix = res['mix']
         with self.lock:
             v = self.store.version(sid)
-            keep = j.get('keep') or [t for t in v['tracks'] if t.get('pinned')]
+            # Pinned when it was asked for, or pinned since (while it was being made): both stay pinned.
+            keep = (j.get('keep') or []) + [t for t in v['tracks'] if t.get('pinned')]
             tracks = compose.tracks_for(mix, research.found, self.cat, keep=keep)
             title = (mix.get('title') or '').strip()[:80] or v['brief'].get('title')
             said = (v['brief'].get('mix') or {}).get('said') or j.get('said')
             brief = dict(v['brief'], mix={'title': title, 'said': said, 'composed': True})
             mins = round(sum(E.dur_ms(t) for t in tracks) / 60000)
             reply = f"Here it is: \u201c{title}\u201d, {len(tracks)} songs, {mins} minutes."
-            n = self.store.add_version(sid, 'compose', None, reply, brief, slim(tracks))
+            # The first mix has nothing before it worth going back to (an empty playlist being made): no undo.
+            n = self.store.add_version(sid, 'compose', None, reply, brief, slim(tracks), parent=None if v['tracks'] else 0)
             self.store.mark_served(sid, tracks)
             story = {'title': title, 'intro': (mix.get('intro') or '').strip(), 'outro': (mix.get('outro') or '').strip(),
                      'notes': {t['id']: (m.get('note') or '').strip() for t, m in zip(tracks, mix['songs'])},
@@ -486,11 +488,34 @@ class Canvas:
             if not cur or not cur.get('parent'):
                 return self.session(sid)
             prev = self.store.version(sid, cur['parent'])
-            self.store.add_version(sid, 'undo', 'Undo', 'Back to how it was.', prev['brief'], prev['tracks'], parent=prev.get('parent') or 0)
+            n = self.store.add_version(sid, 'undo', 'Undo', 'Back to how it was.', prev['brief'], prev['tracks'], parent=prev.get('parent') or 0)
+            story = self.story_for(sid, prev['n'], prev['tracks'])
+            if story and story.get('composed'):  # a composed mix comes back with its own story, not the newer one's
+                self.restore_story(sid, n, story)
             self.store.mark_served(sid, prev['tracks'])
             self.store.update_session(sid, ytm_state='pending' if self.store.session(sid).get('ytm_state') != 'off' else 'off')
             self.store.enqueue(sid)
         return self.session(sid)
+
+    def story_for(self, sid, n, tracks):
+        """The composed story that tells these songs: the newest written for all of them (an edit keeps some of a
+        mix's songs; an undo brings an older set back), else the latest."""
+        ids = {t['id'] for t in tracks}
+        for k in range(n, 0, -1):
+            st = self.store.get(f'mix:{sid}:{k}')
+            if st and st.get('composed') and ids <= set(st.get('ids') or []):
+                return st
+        return self.store.get(f'mix:{sid}')
+
+    def restore_story(self, sid, n, story):
+        """A composed story becomes version n's (and the playlist's current) story."""
+        story = dict(story, n=n)
+        self.store.put(f'mix:{sid}:{n}', story)
+        self.store.put(f'mix:{sid}', story)
+        body = '\n\n'.join(x for x in (story.get('intro'), story.get('outro')) if x)
+        self.store.update_session(sid, notes_state='ready', story_state='ready',
+                                  story=json.dumps({'title': story.get('title'), 'body': body, 'intro': story.get('intro'),
+                                                    'outro': story.get('outro'), 'mix': True}))
 
     def delete(self, sid):
         with self.lock:
@@ -501,6 +526,8 @@ class Canvas:
         s = self.store.session(sid)
         if not s or s['deleted']:
             return None
+        if not self.store.version(sid)['tracks']:
+            return dict(self.session(sid), note='Nothing to save yet: the songs are still being chosen.')
         self.store.update_session(sid, **{k: 'pending' for k in ('ytm_state', 'sp_state') if s.get(k) not in (None, 'off')})
         self.store.enqueue(sid)
         # A resync makes no version, so the last change's reply would be stale: say what this one does instead.
@@ -513,6 +540,9 @@ class Canvas:
         self.store.set_lens(day, text or None)
         for s in self.store.sessions_on(day):
             if s['version'] > 0:
+                v = self.store.version(s['id'])
+                if v['brief'].get('mix') or not v['tracks']:
+                    continue  # a mix's story was written with its songs; a mix still being made has none yet
                 self.store.update_session(s['id'], story_state='pending')
                 self.store.enqueue(s['id'])
         return text or None
@@ -533,6 +563,23 @@ LENS_IDEAS = ['20th-century history', 'Something romantic', 'Pop culture of the 
               'Cinema', 'The Partition', 'The Jazz Age', 'Mughal India', 'The space race', 'Cricket', 'Food and how we eat',
               'The Cold War', "Bollywood's golden age", 'Architecture', 'Explorers', 'Women who changed music', 'Old Bangalore',
               'Science', 'Myths and epics', 'The 1970s', 'Cities', 'Rivers', 'Inventions', 'Love letters']
+
+
+def rules_of(b):
+    """The hard constraints in a brief, in words the composer is held to."""
+    rules = []
+    if E.is_instrumental(b):
+        rules.append('Instrumental only: no singing at all.')
+    if b.get('include_artists'):
+        rules.append('Include songs by: ' + ', '.join(b['include_artists']) + '.')
+    if b.get('exclude_artists'):
+        rules.append('Nothing by: ' + ', '.join(b['exclude_artists']) + '.')
+    if b.get('origins'):
+        rules.append('Only music from: ' + ', '.join(b['origins']) + '.')
+    for w in b.get('want') or []:
+        what = ' '.join(str(w[k]) for k in ('origin', 'world', 'artist') if w.get(k))
+        rules.append(f"At least {w['count']} {what} songs.")
+    return rules
 
 
 def lens_ideas(day, n=5):

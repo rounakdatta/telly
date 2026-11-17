@@ -49,6 +49,10 @@ class ComposeError(Exception):
     pass
 
 
+class Superseded(ComposeError):
+    """He asked again (or deleted the playlist) while this was being made: stop, the newer ask runs next."""
+
+
 # -- what the composer can do --------------------------------------------------------------------------------------------
 TOOLS = [
     {'name': 'history', 'description':
@@ -129,8 +133,8 @@ What makes a mix he loves:
   idea. When the two truly don't meet, the moment wins and the subject lives in the story.
 - Songs that suit the moment as they actually sound: a run must move, a bedtime must settle, a walk must walk. Range
   across languages, decades and voices is part of the pleasure, unless his words narrow it. His history tells you what
-  he knows and what he has worn out; it never decides the language or the genre. That he has played more Hindi than
-  anything else is no reason to choose Hindi.
+  he knows and what he has worn out; it never decides the language or the genre. That he has played one language or
+  genre most is no reason to choose it.
 - An order with meaning, mapped onto the moment: what opens, what carries the busy stretch, what settles, what lands as
   he arrives.
 - Stories, not bios. For each song the one thing worth telling: a scene, a quote, how it was made, what it does to you,
@@ -208,7 +212,8 @@ class _Paced:
         self.lock.release()
 
 
-APPLE, WIKI, LRC, ARCTIC = _Paced(3.0), _Paced(1.0), _Paced(0.5), _Paced(10.0)
+APPLE, WIKI, LRC, ARCTIC, GENIUS = _Paced(3.0), _Paced(1.0), _Paced(0.5), _Paced(10.0), _Paced(1.0)
+CACHES = ('applefind1:', 'lrclib1:', 'wiki2:', 'arctic1:')  # what Research keeps (a month), evicted daily
 
 
 def _get_json(url, pace, headers=None, timeout=20):
@@ -376,7 +381,7 @@ class Research:
                 hits = (d.get('query') or {}).get('search') or []
                 if hits:
                     t, text = extract(hits[0]['title'])
-            return {'title': t, 'text': text} if text else None
+            return {'title': t, 'text': text[:60000]} if text else None
 
         got = self._cached(key, fresh)
         if not got:
@@ -398,7 +403,8 @@ class Research:
 
     def t_genius(self, title, artist):
         try:
-            page = self.genius.page(title, artist)
+            with GENIUS:
+                page = self.genius.page(title, artist)
         except Unreachable as e:
             return f'Genius is unreachable just now ({e}).'
         if not page:
@@ -492,9 +498,10 @@ def _say(name, args):
 
 # -- making it -------------------------------------------------------------------------------------------------------------
 def brief(about, moment, said, lens, minutes, today, top_ever=(), top_year=(), recent=(), notebook=(), current=None,
-          instruction=None):
+          instruction=None, rules=()):
     """What the composer is told about this moment and him. `current`: the mix as it is (title, songs with a pinned
-    flag) when he asks for it to change; `instruction`: what he asked."""
+    flag) when he asks for it to change; `instruction`: what he asked since; `rules`: hard constraints from his words
+    (instrumental only, artists in or out)."""
     parts = [f'For: {moment}', f'His words: "{said}"' if said else '',
              f'What he wants to learn about today: "{lens}"' if lens else 'Nothing in particular he wants to learn about today.',
              f'Length: about {minutes} minutes.', f'Today is {today}.', '', f'About him: {about}' if about else '']
@@ -506,19 +513,24 @@ def brief(about, moment, said, lens, minutes, today, top_ever=(), top_year=(), r
         parts.append('Mixes he has had lately (no repeats; find fresh ground):\n' + '\n'.join(f'- {r}' for r in recent))
     if notebook:
         parts.append('What he has said about past mixes:\n' + '\n'.join(f'- {n}' for n in notebook))
-    if current:
+    if rules:
+        parts.append('Hard rules from his words:\n' + '\n'.join(f'- {r}' for r in rules))
+    if current and current.get('songs'):
         songs = '\n'.join(f"- {t['artist']} – {t['title']}{' (he pinned this: it stays, in place)' if t.get('pinned') else ''}"
                           for t in current.get('songs') or [])
         parts += ['', f"The mix he has now, \u201c{current.get('title') or ''}\u201d:\n{songs}",
                   f'He now asks: "{instruction}"' if instruction else 'He asked for it to be made again.',
                   'Keep what still serves the idea and his ask; change what doesn\'t. Write the story afresh for the mix '
                   'as it ends up.']
+    elif instruction and instruction != said:
+        parts += ['', f'Since he asked, he has added: "{instruction}"']
     return '\n'.join(p for p in parts if p is not None).strip()
 
 
 class Composer:
-    def __init__(self, llm, research, about='', examples='', effort=EFFORT):
+    def __init__(self, llm, research, about='', examples='', effort=EFFORT, keep=()):
         self.llm, self.research, self.about, self.examples, self.effort = llm, research, about, examples, effort
+        self.keep = list(keep)  # (artist, title) of songs he pinned: a reworked mix must still have them
 
     def system(self):
         s = CRAFT
@@ -527,11 +539,13 @@ class Composer:
                   f"mix finds its own.\n\n{self.examples}")
         return s
 
-    def make(self, brief, minutes, progress=lambda s: None, deadline=None, edit=True):
-        """-> {'mix', 'draft', 'log', 'usage', 'editor_notes', 'seconds'}; raises ComposeError when it can't."""
+    def make(self, brief, minutes, progress=lambda s: None, deadline=None, edit=True, alive=lambda: True):
+        """-> {'mix', 'draft', 'log', 'usage', 'editor_notes', 'seconds'}; raises ComposeError when it can't, Superseded
+        as soon as `alive()` says the mix is no longer wanted (asked again, deleted), so the newer ask needn't wait."""
         t0 = time.time()
         deadline = deadline or t0 + 30 * 60
         usage = {}
+        self.alive = alive
         draft, research_log, _ = self._loop(self.system(), f'{brief}\n\nMake the mix.', minutes, progress, deadline, usage)
         mix, notes = draft, ''
         if edit:
@@ -541,7 +555,9 @@ class Composer:
                     f"{self._digest(research_log)}\n\nEdit it.")
             try:
                 mix, _, notes = self._loop(editor_brief, user, minutes, progress, deadline, usage)
-            except (ComposeError, LLMError) as e:  # the draft stands when the editor can't finish
+            except Superseded:
+                raise
+            except Exception as e:  # the draft stands when the editor can't finish, whatever stopped it
                 log.warning('compose: editor failed, keeping the draft: %s', e)
                 notes = f'(editor failed: {e})'
         return {'mix': mix, 'draft': draft, 'log': research_log, 'usage': usage, 'editor_notes': notes,
@@ -554,13 +570,16 @@ class Composer:
         pool = concurrent.futures.ThreadPoolExecutor(max_workers=6)
         try:
             for _ in range(MAX_TURNS):
+                if not getattr(self, 'alive', lambda: True)():
+                    raise Superseded('asked again')
                 if time.time() > deadline:
                     raise ComposeError('ran out of time')
                 # Cached as it grows (the request-level breakpoint moves to the end each turn): a mix is a few dozen
                 # turns over the same long conversation, and without it every turn paid for all of it again.
                 msg = self.llm.stream({'max_tokens': 64000, 'system': [{'type': 'text', 'text': system, 'cache_control': {'type': 'ephemeral'}}],
                                        'messages': messages, 'tools': tools, 'thinking': {'type': 'adaptive'},
-                                       'output_config': {'effort': self.effort}, 'cache_control': {'type': 'ephemeral'}}, betas=BETAS)
+                                       'output_config': {'effort': self.effort}, 'cache_control': {'type': 'ephemeral'}},
+                                      betas=BETAS, retries=4, wait=15)  # a busy minute shouldn't sink a half-made mix
                 for k, v in (msg.get('usage') or {}).items():
                     if isinstance(v, (int, float)):
                         usage[k] = usage.get(k, 0) + v
@@ -595,7 +614,10 @@ class Composer:
                             done = b['input']
                             results.append({'type': 'tool_result', 'tool_use_id': b['id'], 'content': 'Delivered.'})
                         continue
-                    out = futures[b['id']].result()
+                    try:
+                        out = futures[b['id']].result(timeout=300)
+                    except concurrent.futures.TimeoutError:
+                        out = f"{b['name']} took too long and was given up on; work without it."
                     research_log.append({'tool': b['name'], 'input': b.get('input'), 'output': out})
                     results.append({'type': 'tool_result', 'tool_use_id': b['id'], 'content': out or '(nothing)'})
                 if done:
@@ -603,7 +625,7 @@ class Composer:
                 messages.append({'role': 'user', 'content': results})
             raise ComposeError('too many turns')
         finally:
-            pool.shutdown(wait=False)
+            pool.shutdown(wait=False, cancel_futures=True)
 
     @staticmethod
     def _server_reads(content, progress):
@@ -644,6 +666,11 @@ class Composer:
             artists.add(a)
             if not (s.get('note') or '').strip():
                 problems.append(f"{s.get('title')} has no note.")
+        have = {(nartist(first_artist((self.research.found.get(s.get('apple_id')) or {}).get('artist') or '')),
+                 ntrack((self.research.found.get(s.get('apple_id')) or {}).get('title') or '')) for s in songs}
+        for a, t in self.keep:
+            if not any(ha == nartist(first_artist(a)) and (ht.startswith(ntrack(t)) or ntrack(t).startswith(ht)) for ha, ht in have if ht):
+                problems.append(f'He pinned {t} by {a}: it stays in the mix (find it with find_recording).')
         lo, hi = minutes * 0.8, minutes + max(2.5, minutes * 0.1)
         if not problems and not lo * 60_000 <= total <= hi * 60_000:
             problems.append(f'The songs add up to {_mmss(total)} for a {minutes}-minute moment: aim for {lo:.0f} to {hi:.0f} minutes.')
@@ -684,12 +711,19 @@ def job(store, sid):
     return store.get(_key(sid))
 
 
+STALE = 45 * 60  # a mix makes progress every minute or two; this long without any, it has stopped
+
+
 def public(j):
-    """What the app sees of a job: where it is and the last few things it did."""
+    """What the app sees of a job: where it is and the last few things it did. One that stopped answering (the worker
+    died mid-mix and never came back) is shown as failed, so it can be tried again rather than waited on for ever."""
     if not j:
         return None
-    return {'state': j['state'], 'progress': (j.get('progress') or [])[-6:], 'since': j.get('started') or j.get('queued'),
-            'error': j.get('error')}
+    state, error = j['state'], j.get('error')
+    if state == 'working' and time.time() - (j.get('beat') or j.get('started') or 0) > STALE:
+        state, error = 'failed', 'It stopped answering partway through. Try again.'
+    return {'state': state, 'progress': (j.get('progress') or [])[-6:], 'since': j.get('started') or j.get('queued'),
+            'error': error}
 
 
 def recent(store, today, exclude=None, days=14, limit=12):
@@ -728,27 +762,42 @@ def tracks_for(mix, found, cat, keep=()):
 
 
 class Worker(threading.Thread):
-    """Makes the mixes asked for, one at a time (each takes minutes), in the worker process."""
+    """Makes the mixes asked for, one at a time (each takes minutes), in the worker process.
+
+    The API process writes the job records (a new ask replaces the old one); this thread writes them only while they
+    are still the job it is making (Store.swap_if), so a newer ask is never overwritten, and it stops making a mix as
+    soon as nobody wants it any more."""
 
     def __init__(self, store, canvas, poll=2.0):
         super().__init__(daemon=True, name='composer')
         self.store, self.canvas, self.poll = store, canvas, poll
+        self._evicted = 0.0
 
-    def requeue(self):
-        """A deploy mid-mix (every deploy restarts the worker): what was being made starts again."""
+    def requeue(self, stale_only=False):
+        """A deploy mid-mix (every deploy restarts the worker): what was being made starts again. With `stale_only`,
+        only jobs nobody has touched for a long while (orphaned by a crash this thread survived)."""
         for k in self.store.keys('compose:'):
             j = self.store.get(k)
-            if j and j.get('state') == 'working':
-                self.store.put(k, dict(j, state='queued', progress=[]))
+            if j and j.get('state') == 'working' and \
+                    (not stale_only or time.time() - (j.get('beat') or j.get('started') or 0) > STALE):
+                self.store.swap_if(k, j['job'], dict(j, state='queued', progress=[]))
 
     def run(self):
-        self.requeue()
+        try:
+            self.requeue()
+        except Exception:
+            log.exception('composer: requeue')
         while True:
             try:
+                if time.time() - self._evicted > 86400:
+                    self._evicted = time.time()
+                    gone = sum(self.store.evict(p, time.time() - KEEP) for p in CACHES)
+                    log.info('composer: %d cached lookups older than a month dropped', gone)
                 sid = self.next()
                 if sid:
                     self.make(sid)
                 else:
+                    self.requeue(stale_only=True)
                     time.sleep(self.poll)
             except Exception:
                 log.exception('composer')
@@ -768,37 +817,41 @@ class Worker(threading.Thread):
         if not j or j.get('state') != 'queued':
             return
         jid = j['job']
-        self.store.put(key, dict(j, state='working', started=time.time(), progress=[]))
+        if not self.store.swap_if(key, jid, dict(j, state='working', started=time.time(), beat=time.time(), progress=[])):
+            return  # asked again in the meantime: that one is next
 
         def current():
             now = self.store.get(key)
             return now if now and now.get('job') == jid else None
 
+        def alive():
+            s = self.store.session(sid)
+            return current() is not None and bool(s) and not s['deleted']
+
         def progress(line):
             now = current()
             if now:
-                self.store.put(key, dict(now, progress=(now.get('progress') or [])[-11:] + [line]))
+                self.store.swap_if(key, jid, dict(now, beat=time.time(), progress=(now.get('progress') or [])[-11:] + [line]))
 
-        s = self.store.session(sid)
-        if not s or s['deleted']:
-            self.store.put(key, None)
-            return
         try:
-            res, research = self.canvas.compose(s, j, progress)
-            if not current():
-                return  # asked again while this was made: the newer ask wins
+            if not alive():
+                self.store.swap_if(key, jid, None)
+                return
+            res, research = self.canvas.compose(self.store.session(sid), j, progress, alive)
+            if not alive():
+                raise Superseded('asked again')
+            self.canvas.save_composed(sid, j, res, research)
+            self.store.swap_if(key, jid, None)  # done; unless he asked again meanwhile, which then runs next
+        except Superseded:
+            log.info('compose %s: asked again or deleted; stopped', sid)
             s = self.store.session(sid)
             if not s or s['deleted']:
-                self.store.put(key, None)
-                return
-            self.canvas.save_composed(sid, j, res, research)
-            if current():
-                self.store.put(key, None)
+                self.store.swap_if(key, jid, None)
         except Exception as e:
             log.warning('compose %s: %s', sid, str(e)[:300])
             now = current()
             if now:
-                self.store.put(key, dict(now, state='failed', error=_plain(e)))
+                self.store.swap_if(key, jid, dict(now, state='failed', error=_plain(e)))
 
 
 def _plain(e):

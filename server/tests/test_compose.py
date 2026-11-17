@@ -43,7 +43,7 @@ def turn(*blocks, stop='tool_use'):
 
 
 def deliver(id_, songs, title='The Traffic Wrote the Words'):
-    return use('deliver_mix', id_, title=title, intro='Give the road a minute.', outro='You don’t have a train to catch.',
+    return use('deliver_mix', id_, title=title, intro=f'Intro of {title}.', outro='You don’t have a train to catch.',
                songs=[{'apple_id': a, 'title': t, 'artist': r, 'note': f'A note on {t}.'} for a, t, r in songs],
                facts=[{'claim': 'Joni wrote it in Chelsea', 'source': 'wikipedia: Chelsea Morning'}])
 
@@ -150,8 +150,8 @@ class ComposerTest(Base):
         self.assertIn('never played "No Such Song"', r.t_history(title='No Such Song'))
 
 
-class ComposingTest(Base):
-    """The background job, through the canvas the app talks to."""
+class ComposingBase(Base):
+    """A canvas with a composer (a script stands in for the model) and no network."""
 
     def setUp(self):
         from telly.canvas import Canvas
@@ -178,6 +178,10 @@ class ComposingTest(Base):
         got = self.canvas.prompt(self.day, 'a walk to the cafe, noticing small things')
         return got['focus'], got
 
+
+class ComposingTest(ComposingBase):
+    """The background job, through the canvas the app talks to."""
+
     def test_a_new_moment_is_composed_in_the_background_and_arrives_with_its_story(self):
         llm = Script(RESEARCH, turn(deliver('d1', GOOD)), turn(deliver('e1', GOOD)))
         sid, got = self.new_mix(llm)
@@ -196,7 +200,8 @@ class ComposingTest(Base):
         self.assertEqual(s['tracks'][0]['note'], 'A note on Chelsea Morning.')
         self.assertTrue(s['tracks'][0]['new'])
         self.assertEqual(s['summary'], '“The Traffic Wrote the Words”')
-        self.assertEqual(s['story']['intro'], 'Give the road a minute.')
+        self.assertEqual(s['story']['intro'], 'Intro of The Traffic Wrote the Words.')
+        self.assertFalse(s['can_undo'])  # nothing before the first mix worth going back to (an empty playlist)
         self.assertEqual(s['story']['outro'], 'You don’t have a train to catch.')
         self.assertIn('Here it is', s['log'][-1]['reply'])
         self.assertEqual((s['ytm']['state'], s['spotify']['state']), ('pending', 'pending'))  # now there is something to save

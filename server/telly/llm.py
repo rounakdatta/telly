@@ -11,12 +11,12 @@ class LLMError(Exception):
 
 
 class _Overloaded(Exception):
-    """The stream itself reported overload or a server error: worth another try."""
+    """The stream itself reported overload or a server error, or was cut short: worth another try."""
 
 
 def _assemble(lines):
     """Server-sent events -> one message dict, its content blocks complete (tool inputs parsed, thinking signed)."""
-    msg, blocks = {}, {}
+    msg, blocks, stopped = {}, {}, False
     for raw in lines:
         line = raw.decode('utf-8', 'replace').strip()
         if not line.startswith('data:'):
@@ -47,7 +47,12 @@ def _assemble(lines):
             b = blocks[d['index']]
             if '_json' in b:
                 raw_json = b.pop('_json')
-                b['input'] = json.loads(raw_json) if raw_json.strip() else (b.get('input') or {})
+                try:
+                    b['input'] = json.loads(raw_json) if raw_json.strip() else (b.get('input') or {})
+                except ValueError:
+                    raise _Overloaded('a tool call arrived cut short') from None
+        elif t == 'message_stop':
+            stopped = True
         elif t == 'message_delta':
             msg.update({k: v for k, v in (d.get('delta') or {}).items() if v is not None})
             msg['usage'] = {**(msg.get('usage') or {}), **(d.get('usage') or {})}
@@ -56,6 +61,10 @@ def _assemble(lines):
             if err.get('type') in ('overloaded_error', 'api_error'):
                 raise _Overloaded(err.get('message') or err.get('type'))
             raise LLMError(f"{err.get('type')}: {err.get('message')}")
+    if not stopped:
+        # A stream that just ends (a dropped connection, a proxy timing out) leaves blocks half built; sent back, they
+        # fail the next turn. Asked again instead.
+        raise _Overloaded('the stream ended before the message did')
     content = []
     for i in sorted(blocks):
         b = blocks[i]
