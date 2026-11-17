@@ -556,9 +556,11 @@ class Composer:
             for _ in range(MAX_TURNS):
                 if time.time() > deadline:
                     raise ComposeError('ran out of time')
+                # Cached as it grows (the request-level breakpoint moves to the end each turn): a mix is a few dozen
+                # turns over the same long conversation, and without it every turn paid for all of it again.
                 msg = self.llm.stream({'max_tokens': 64000, 'system': [{'type': 'text', 'text': system, 'cache_control': {'type': 'ephemeral'}}],
                                        'messages': messages, 'tools': tools, 'thinking': {'type': 'adaptive'},
-                                       'output_config': {'effort': self.effort}}, betas=BETAS)
+                                       'output_config': {'effort': self.effort}, 'cache_control': {'type': 'ephemeral'}}, betas=BETAS)
                 for k, v in (msg.get('usage') or {}).items():
                     if isinstance(v, (int, float)):
                         usage[k] = usage.get(k, 0) + v
