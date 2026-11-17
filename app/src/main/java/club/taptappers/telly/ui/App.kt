@@ -148,6 +148,7 @@ fun App(model: TellyModel) {
                                 onRemove = { i -> s.tracks.getOrNull(i)?.let { model.remove(s.id, i, it.id, it.title) } },
                                 onPin = { i, on -> s.tracks.getOrNull(i)?.let { model.pin(s.id, i, it.id, it.title, on) } },
                                 onResync = { model.resync(s.id) }, onDelete = { model.delete(s.id) },
+                                onRecompose = { model.recompose(s.id) }, onQuick = { model.quick(s.id) },
                             ), bottomSpace = composerSpace)
                     } else {
                         Ambient(hourTint(12))

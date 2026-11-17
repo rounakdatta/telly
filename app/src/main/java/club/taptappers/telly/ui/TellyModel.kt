@@ -118,7 +118,13 @@ class TellyModel(app: Application) : AndroidViewModel(app) {
 
     fun back() {
         _state.update { if (it.stack.size > 1) it.copy(stack = it.stack.dropLast(1)) else it }
-        if (_state.value.top == Screen.Today) refreshDay()
+        // Back on a playlist (from the lyrics, say), it is looked at again: a mix may have arrived meanwhile, and the
+        // poll that was following it stopped when it went off screen.
+        when (val top = _state.value.top) {
+            Screen.Today -> refreshDay()
+            is Screen.Playlist -> refreshSession(top.id)
+            else -> Unit
+        }
     }
 
     fun setForeground(on: Boolean) {
@@ -315,6 +321,8 @@ class TellyModel(app: Application) : AndroidViewModel(app) {
         mutate(id, "pin$index", if (on) "Keep $title in place" else "Let $title change") { api.edit(id, if (on) "pin" else "unpin", index, trackId) }
     fun undo(id: String) = mutate(id, "undo", "Undo") { api.undo(id) }
     fun resync(id: String) = mutate(id, "sync", "Save it to the services again") { api.resync(id) }
+    fun recompose(id: String) = mutate(id, "compose", "Try the mix again") { api.recompose(id) }
+    fun quick(id: String) = mutate(id, "quick", "A quick list instead") { api.quick(id) }
 
     private fun mutate(id: String, what: String, label: String, call: suspend () -> Session) {
         if (_state.value.working != null || _state.value.sending) return

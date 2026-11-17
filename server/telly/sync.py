@@ -126,6 +126,13 @@ class Worker(threading.Thread):
         v = self.store.version(sid)
         if not v:
             return
+        if not v['tracks']:
+            # A mix still being made (or one that failed): nothing to save, note or tell until its songs arrive. Say
+            # so, rather than leave "pending" for the app to wait on for ever.
+            self.store.update_session(sid, **{k: w for k, w in (('ytm_state', 'waiting'), ('sp_state', 'waiting'),
+                                                                 ('notes_state', 'none'), ('story_state', 'none'))
+                                              if s.get(k) in (None, 'pending', 'syncing', 'writing')})
+            return
         y, sp = self.services.ytm(), self.services.spotify()
         if y:
             self._ytm(y, s, v)
@@ -287,6 +294,12 @@ class Worker(threading.Thread):
                 done = True
                 return
             last = self.store.get(f'mix:{sid}')
+            if last and last.get('composed'):
+                # Composed with its songs, never rewritten after the fact: this version gets the story that tells
+                # its songs (an edit keeps some of them, an undo brings older ones back).
+                self.canvas.restore_story(sid, v['n'], self.canvas.story_for(sid, v['n'] - 1, v['tracks']) or last)
+                done = True
+                return
             if last and last.get('ids') and sorted(last['ids']) == sorted(t['id'] for t in v['tracks']):
                 self.store.put(key, dict(last, n=v['n']))  # the same songs: the same story
                 done = True

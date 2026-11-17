@@ -56,6 +56,8 @@ class Api(private val prefs: Prefs) {
         post("/api/session/$id/edit", buildJsonObject { put("op", op); put("index", index); put("id", trackId) }, Session.serializer())
     suspend fun undo(id: String): Session = post("/api/session/$id/undo", JsonObject(emptyMap()), Session.serializer())
     suspend fun resync(id: String): Session = post("/api/session/$id/sync", JsonObject(emptyMap()), Session.serializer())
+    suspend fun recompose(id: String): Session = post("/api/session/$id/compose", JsonObject(emptyMap()), Session.serializer())
+    suspend fun quick(id: String): Session = post("/api/session/$id/quick", JsonObject(emptyMap()), Session.serializer())
     suspend fun delete(id: String) {
         call { url -> Request.Builder().url(url("/api/session/$id")).delete().build() }
     }

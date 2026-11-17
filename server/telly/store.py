@@ -90,6 +90,28 @@ class Store:
             r = c.execute('SELECT v FROM kv WHERE k=?', (k,)).fetchone()
         return json.loads(r['v']) if r else default
 
+    def swap_if(self, k, job, v):
+        """Replace a job record only while it is still that job (the API and the worker both write them): False when a
+        newer ask replaced it meanwhile. v=None removes it."""
+        with self.db() as c:
+            if v is None:
+                cur = c.execute("DELETE FROM kv WHERE k=? AND json_extract(v, '$.job')=?", (k, job))
+            else:
+                cur = c.execute("UPDATE kv SET v=? WHERE k=? AND json_extract(v, '$.job')=?", (json.dumps(v), k, job))
+            return cur.rowcount > 0
+
+    def evict(self, prefix, before):
+        """Drop cached lookups under `prefix` written before `before` (epoch s); returns how many."""
+        with self.db() as c:
+            cur = c.execute("DELETE FROM kv WHERE k >= ? AND k < ? AND COALESCE(json_extract(v, '$.ts'), 0) < ?",
+                            (prefix, prefix + '\uffff', before))
+            return cur.rowcount
+
+    def keys(self, prefix):
+        """Every key starting with `prefix`."""
+        with self.db() as c:
+            return [r['k'] for r in c.execute('SELECT k FROM kv WHERE k >= ? AND k < ?', (prefix, prefix + '\uffff'))]
+
     def put(self, k, v):
         with self.db() as c:
             if v is None:

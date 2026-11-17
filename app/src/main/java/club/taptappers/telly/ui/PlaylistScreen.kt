@@ -47,6 +47,12 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.produceState
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.animation.core.Animatable
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
+import kotlinx.coroutines.delay
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -72,6 +78,7 @@ import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.sin
 import club.taptappers.telly.R
+import club.taptappers.telly.data.Composing
 import club.taptappers.telly.data.Session
 import club.taptappers.telly.data.Track
 import dev.chrisbanes.haze.HazeState
@@ -89,6 +96,10 @@ class PlaylistActions(
     val onPin: (Int, Boolean) -> Unit,
     val onResync: () -> Unit,
     val onDelete: () -> Unit,
+    /** Make the mix again (after it failed). */
+    val onRecompose: () -> Unit = {},
+    /** The engine's list from his history, now, for when he can't wait for the mix. */
+    val onQuick: () -> Unit = {},
 )
 
 @Composable
@@ -111,17 +122,23 @@ fun PlaylistScreen(s: Session, working: String?, updating: Boolean, fresh: Set<S
             contentPadding = PaddingValues(top = top + 60.dp, bottom = bottomSpace + 28.dp),
         ) {
             item(key = "hero") { Hero(s) }
-            item(key = "actions") { PlayRow(s, working, actions) }
-            item(key = "tweaks") { Tweaks(s, working, actions) }
+            // Until the songs arrive there is nothing to play, save or reshape: no buttons for what doesn't exist yet.
+            if (s.tracks.isNotEmpty()) {
+                item(key = "actions") { PlayRow(s, working, actions) }
+                item(key = "tweaks") { Tweaks(s, working, actions) }
+            }
             item(key = "progress") {
                 Box(Modifier.fillMaxWidth().height(2.dp).padding(horizontal = 20.dp)) {
                     if (updating) LinearProgressIndicator(Modifier.fillMaxWidth(), color = accent, trackColor = Color.Transparent)
                 }
             }
+            s.composing?.let { c -> item(key = "composing") { ComposingCard(c, hasSongs = s.tracks.isNotEmpty(), working, actions) } }
+            if (s.composed) s.story.intro?.takeIf { it.isNotBlank() }?.let { item(key = "intro") { Letter(it, Modifier.padding(top = 18.dp, bottom = 10.dp)) } }
             itemsIndexed(s.tracks, key = { _, t -> t.id }) { i, t ->
                 TrackRow(t, accent, fresh = t.id in fresh, playing = playing?.takeIf { it.first == i }?.second, onClick = { sheet = i },
-                    modifier = Modifier.animateItem().graphicsLayer { alpha = listAlpha })
+                    modifier = Modifier.animateItem().graphicsLayer { alpha = listAlpha }, whole = s.composed)
             }
+            if (s.composed) s.story.outro?.takeIf { it.isNotBlank() }?.let { item(key = "outro") { Letter(it, Modifier.padding(top = 14.dp), italic = true) } }
             item(key = "notes") { LinerNotes(s) }
             item(key = "log") { Conversation(s) }
         }
@@ -166,10 +183,15 @@ private fun Hero(s: Session) {
         Text(s.name, style = T.title, color = C.text, textAlign = TextAlign.Center, modifier = Modifier.semantics { heading() })
         Spacer(Modifier.height(6.dp))
         val time = s.startLabel?.takeIf { !s.title.contains(it, ignoreCase = true) }
-        Text(listOfNotNull(time, "${s.durationMin} min", "${s.count} songs", s.weather).joinToString("  ·  "),
+        val size = if (s.tracks.isEmpty()) listOf("${s.minutes} min") else listOf("${s.durationMin} min", "${s.count} songs")
+        Text((listOfNotNull(time) + size + listOfNotNull(s.weather)).joinToString("  ·  "),
             style = T.tabular, color = C.text2, textAlign = TextAlign.Center)
-        Spacer(Modifier.height(10.dp))
-        Text(s.summary, style = T.caption, color = C.text3, textAlign = TextAlign.Center)
+        if (s.summary.isNotBlank()) {
+            Spacer(Modifier.height(10.dp))
+            // A composed mix's summary is its name, said like a title rather than a caption.
+            Text(s.summary, style = if (s.composed) T.body.copy(fontStyle = FontStyle.Italic) else T.caption,
+                color = if (s.composed) C.text2 else C.text3, textAlign = TextAlign.Center)
+        }
     }
 }
 
@@ -238,7 +260,9 @@ private fun Tweaks(s: Session, working: String?, actions: PlaylistActions) {
 }
 
 @Composable
-private fun TrackRow(t: Track, accent: Color, fresh: Boolean, onClick: () -> Unit, modifier: Modifier = Modifier, playing: Boolean? = null) {
+private fun TrackRow(t: Track, accent: Color, fresh: Boolean, onClick: () -> Unit, modifier: Modifier = Modifier, playing: Boolean? = null,
+                     /** A composed mix's note is a paragraph of its story: shown whole, to be read. */
+                     whole: Boolean = false) {
     // A song that just arrived glows for a moment, then settles: what changed is visible without a word.
     val glow by animateFloatAsState(if (fresh) 1f else 0f, tween(if (fresh) 300 else 1600), label = "fresh")
     Row(
@@ -270,8 +294,12 @@ private fun TrackRow(t: Track, accent: Color, fresh: Boolean, onClick: () -> Uni
             Text(t.artist, style = T.caption, color = C.text2, maxLines = 1, overflow = TextOverflow.Ellipsis)
             // The friend leaning over: arrives a little after the playlist, so it fades in rather than pops.
             AnimatedVisibility(visible = t.note != null, enter = fadeIn(tween(500)) + expandVertically(tween(300))) {
-                Text(t.note.orEmpty(), style = T.caption, color = C.text.copy(alpha = 0.6f), maxLines = 3, overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.padding(top = 5.dp))
+                if (whole) {
+                    Text(t.note.orEmpty(), style = T.body, color = C.text.copy(alpha = 0.84f), modifier = Modifier.padding(top = 7.dp, bottom = 6.dp))
+                } else {
+                    Text(t.note.orEmpty(), style = T.caption, color = C.text.copy(alpha = 0.6f), maxLines = 3, overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(top = 5.dp))
+                }
             }
         }
     }
@@ -299,10 +327,73 @@ fun Bars(moving: Boolean) {
     }
 }
 
+/** A part of a composed mix's story that isn't about one song: its opening, or the line it lands on. */
+@Composable
+private fun Letter(text: String, modifier: Modifier = Modifier, italic: Boolean = false) {
+    Column(modifier.fillMaxWidth().padding(horizontal = 24.dp)) {
+        text.split(Regex("\n\\s*\n")).forEach { para ->
+            Text(para.trim(), style = if (italic) T.reading.copy(fontStyle = FontStyle.Italic) else T.reading,
+                color = C.text.copy(alpha = 0.88f), modifier = Modifier.padding(bottom = 12.dp))
+        }
+    }
+}
+
+/**
+ * A mix being made: minutes of digging, so it shows what it is doing (the newest step brightest, older ones fading),
+ * how long it has been, and that it carries on if he leaves. Not an empty playlist: "not yet" is not "nothing".
+ * If it failed, it says why in words, with a way forward right there.
+ */
+@Composable
+private fun ComposingCard(c: Composing, hasSongs: Boolean, working: String?, actions: PlaylistActions) {
+    val effects = LocalEffects.current
+    val now by produceState(System.currentTimeMillis(), effects) {
+        while (effects) {  // the minutes tick on; a screenshot holds still
+            delay(20_000)
+            value = System.currentTimeMillis()
+        }
+    }
+    val minutes = c.since?.let { ((now / 1000.0 - it) / 60).toInt().coerceAtLeast(0) } ?: 0
+    Column(Modifier.fillMaxWidth().padding(horizontal = 24.dp).padding(top = 26.dp, bottom = 6.dp)
+        .semantics(mergeDescendants = true) { liveRegion = LiveRegionMode.Polite }) {
+        if (c.failed) {
+            Text(if (hasSongs) "Couldn't rework it" else "Couldn't finish this mix", style = T.headline, color = C.text)
+            c.error?.let { Text(it, style = T.caption, color = C.text2, modifier = Modifier.padding(top = 6.dp)) }
+            Row(Modifier.padding(top = 14.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Chip("Try again", onClick = actions.onRecompose, busy = working == "compose", enabled = working == null)
+                if (!hasSongs) Chip("Quick list instead", onClick = actions.onQuick, busy = working == "quick", enabled = working == null)
+            }
+            return@Column
+        }
+        Text(if (hasSongs) "Reworking it" else "Making your mix", style = T.headline, color = C.text)
+        Text(
+            (if (minutes >= 1) "$minutes min in. " else "") + "Digging takes a few minutes; it carries on if you leave.",
+            style = T.caption, color = C.text3, modifier = Modifier.padding(top = 4.dp),
+        )
+        Spacer(Modifier.height(12.dp))
+        val lines = c.progress.takeLast(4).ifEmpty { listOf("Thinking about the moment first…") }
+        val still = reducedMotion() || !LocalEffects.current
+        lines.forEachIndexed { i, line ->
+            val newest = i == lines.lastIndex
+            // Only the newest step moves (it fades in as it arrives); the rest are just a trail. Reduced motion: it's
+            // simply there.
+            val shown = remember(line) { Animatable(if (newest && !still) 0f else 1f) }
+            if (newest) LaunchedEffect(line) { shown.animateTo(1f, tween(600)) }
+            Text(line, style = T.caption, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                color = if (newest) C.text.copy(alpha = 0.92f * shown.value) else C.text3.copy(alpha = 0.35f + 0.5f * (i + 1) / lines.size),
+                modifier = Modifier.padding(top = 5.dp))
+        }
+        if (!hasSongs) {
+            Text("Can't wait? A quick list from your history", style = T.small, color = C.text3,
+                modifier = Modifier.padding(top = 16.dp).clickable(role = Role.Button, enabled = working == null, onClick = actions.onQuick)
+                    .padding(vertical = 6.dp))
+        }
+    }
+}
+
 @Composable
 private fun LinerNotes(s: Session) {
     val st = s.story
-    if (st.state == "none") return
+    if (st.state == "none" || s.composed || (s.composing != null && s.tracks.isEmpty())) return
     Column(Modifier.fillMaxWidth().padding(horizontal = 24.dp).padding(top = 34.dp)) {
         Text("Liner notes", style = T.small, color = C.text3)
         Spacer(Modifier.height(10.dp))

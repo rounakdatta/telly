@@ -1,10 +1,12 @@
 """The day's canvas: one session per moment of the day, each a chain of versions. Every message, tweak or edit makes a
 new version, so nothing is lost and anything can be undone."""
 import datetime as dt
+import json
 import logging
 import threading
 import time
 
+from . import compose
 from . import curate
 from . import engine as E
 from . import interpret
@@ -34,10 +36,89 @@ def day_label(day):
 
 
 class Canvas:
-    def __init__(self, store, catalogs, place, llm, curator_llm=None):
+    def __init__(self, store, catalogs, place, llm, curator_llm=None, composer_llm=None):
         self.store, self.catalogs, self.place, self.llm = store, catalogs, place, llm
         self.curator_llm = curator_llm  # chooses and orders the songs (curate.py); the engine alone when there is none
+        # Makes the mix and its story the way a friend would (compose.py), in the background: when there is one, every
+        # new mix and every change to one is composed; the curator and the engine are what's left without it.
+        self.composer_llm = composer_llm
+        self.composer_effort = compose.EFFORT
         self.lock = threading.RLock()
+
+    @property
+    def composing(self):
+        return self.composer_llm is not None and self.composer_llm.ready
+
+    def compose(self, s, j, progress, alive=lambda: True):
+        """Make the mix a job asks for (in the worker; minutes) -> (result, research)."""
+        cat = self.cat
+        v = self.store.version(s['id'])
+        b = v['brief']
+        research = compose.Research(cat, self.store)
+        pinned = [t for t in v['tracks'] if t.get('pinned')]
+        composer = compose.Composer(self.composer_llm, research, about=self.about, examples=cat.meta.get('examples') or '',
+                                    effort=self.composer_effort, keep=[(t['artist'], t['title']) for t in pinned])
+        day = s['day']
+        current = {'title': (b.get('mix') or {}).get('title'), 'songs': v['tracks']} if j.get('instruction') and v['tracks'] else None
+        text = compose.brief(self.about, self.moment(day, b, s['title']), (b.get('mix') or {}).get('said') or j.get('said'),
+                             self.store.lens(day), b['minutes'], time.strftime('%A %-d %B %Y', time.strptime(day, '%Y-%m-%d')),
+                             json.loads(cat.meta.get('top_ever') or '[]'), json.loads(cat.meta.get('top_year') or '[]'),
+                             compose.recent(self.store, day, exclude=s['id']), current=current, instruction=j.get('instruction'),
+                             rules=rules_of(b))
+        return composer.make(text, b['minutes'], progress=progress, alive=alive), research
+
+    def save_composed(self, sid, j, res, research):
+        """A finished mix becomes the playlist's next version, its story kept alongside (per version, like the notes)."""
+        mix = res['mix']
+        with self.lock:
+            v = self.store.version(sid)
+            # Pinned when it was asked for, or pinned since (while it was being made): both stay pinned.
+            keep = (j.get('keep') or []) + [t for t in v['tracks'] if t.get('pinned')]
+            tracks = compose.tracks_for(mix, research.found, self.cat, keep=keep)
+            title = (mix.get('title') or '').strip()[:80] or v['brief'].get('title')
+            said = (v['brief'].get('mix') or {}).get('said') or j.get('said')
+            brief = dict(v['brief'], mix={'title': title, 'said': said, 'composed': True})
+            mins = round(sum(E.dur_ms(t) for t in tracks) / 60000)
+            reply = f"Here it is: \u201c{title}\u201d, {len(tracks)} songs, {mins} minutes."
+            # The first mix has nothing before it worth going back to (an empty playlist being made): no undo.
+            n = self.store.add_version(sid, 'compose', None, reply, brief, slim(tracks), parent=None if v['tracks'] else 0)
+            self.store.mark_served(sid, tracks)
+            story = {'title': title, 'intro': (mix.get('intro') or '').strip(), 'outro': (mix.get('outro') or '').strip(),
+                     'notes': {t['id']: (m.get('note') or '').strip() for t, m in zip(tracks, mix['songs'])},
+                     'facts': mix.get('facts') or [], 'ids': [t['id'] for t in tracks], 'n': n, 'composed': True}
+            self.store.put(f'mix:{sid}:{n}', story)
+            self.store.put(f'mix:{sid}', story)
+            body = '\n\n'.join(x for x in (story['intro'], story['outro']) if x)
+            cur = self.store.session(sid)
+            self.store.update_session(sid, notes_state='ready', story_state='ready',
+                                      ytm_state='pending' if cur.get('ytm_state') != 'off' else 'off',
+                                      sp_state='pending' if cur.get('sp_state') != 'off' else 'off',
+                                      story=json.dumps({'title': title, 'body': body, 'intro': story['intro'], 'outro': story['outro'], 'mix': True}))
+            self.store.enqueue(sid)
+        return n
+
+    def recompose(self, sid):
+        """Try a failed mix again, as it was asked."""
+        j = compose.job(self.store, sid)
+        s = self.store.session(sid)
+        if not s or not self.composing:
+            return None
+        if not j:
+            v = self.store.version(sid)
+            j = {'said': (v['brief'].get('mix') or {}).get('said') or s['title'], 'instruction': None}
+        compose.queue(self.store, sid, j.get('said'), j.get('instruction'), j.get('keep'))
+        return self.session(sid)
+
+    def quick(self, sid):
+        """The engine's list, now, for when he can't wait for the mix."""
+        with self.lock:
+            v = self.store.version(sid)
+            b = dict(v['brief'])
+            b.pop('mix', None)
+            tracks, bl = E.rebuild(self.cat, b, int((b.get('start') or '12:00')[:2]), v['tracks'], self._served(sid))
+            self.store.put(f'compose:{sid}', None)
+            self._save(sid, 'tweak', None, ' '.join(['A quick list from your history, made just now.'] + bl.notes), b, tracks)
+        return self.session(sid)
 
     def curator(self):
         if self.curator_llm is None or not self.curator_llm.ready:
@@ -128,12 +209,14 @@ class Canvas:
                          'pinned': bool(t.get('pinned')), 'thumb': thumb, 'duration_s': round(E.dur_ms(t) / 1000), 'note': notes.get(t['id']),
                          'ytm': vid, 'spotify': t.get('spotify_uri') or r.get('sp_uri')})
         start = b.get('start')
-        story = s.get('story')
+        composed = (b.get('mix') or {}).get('composed')
+        summary = (f"\u201c{b['mix']['title']}\u201d" if b['mix'].get('title') else '') if composed else \
+            (mix or {}).get('thread') or (f"\u201c{b['mix']['title']}\u201d. " if b.get('mix') else '') + E.summary(b, tracks)
         out = {
             'id': s['id'], 'day': s['day'], 'title': s['title'], 'activity': b['activity'], 'start': start,
             'start_label': clock(start) if start else None, 'minutes': b['minutes'],
             'duration_min': round(E.duration_ms(tracks) / 60000), 'count': len(tracks),
-            'summary': (mix or {}).get('thread') or (f"\u201c{b['mix']['title']}\u201d. " if b.get('mix') else '') + E.summary(b, tracks),
+            'summary': summary,
             'blurb': E.ACTIVITIES[b['activity']]['blurb'],
             'brief': dict({k: b.get(k) for k in ('familiar', 'energy', 'worlds', 'origins', 'include_artists', 'exclude_artists')},
                           instrumental=E.is_instrumental(b)),
@@ -146,6 +229,9 @@ class Canvas:
             'spotify': {'state': s.get('sp_state') or 'pending', 'url': sp_url(s['sp_id']) if s.get('sp_id') else None, 'error': s.get('sp_error')},
             'story': self._story(s),
         }
+        job = compose.public(compose.job(self.store, s['id']))
+        if job:
+            out['composing'] = job
         if start and s['day'] == self.place.today():
             out['weather'] = self.place.weather(self.place.at(s['day'], start).replace(minute=0))
         if not brief_only:
@@ -159,7 +245,8 @@ class Canvas:
         if s.get('story'):
             d = json.loads(s['story'])
             return {'state': 'ready', 'title': d.get('title'), 'body': d.get('body'), 'deeper': d.get('deeper'),
-                    'deeper_checked': d.get('deeper_checked', False), 'song_id': d.get('song_id')}
+                    'deeper_checked': d.get('deeper_checked', False), 'song_id': d.get('song_id'),
+                    'intro': d.get('intro'), 'outro': d.get('outro')}
         return {'state': st}
 
     # -- writing -------------------------------------------------------------------------------------------------------
@@ -244,7 +331,7 @@ class Canvas:
         """The curator's mix for an action that needs one (a new moment; a curated mix reshaped or reshuffled), worked
         out before the edit takes the lock -> {'n': version it was made from (None for new), 'got': (tracks, brief)}."""
         try:
-            if a.get('delete') or a.get('ops') or self.curator() is None:
+            if a.get('delete') or a.get('ops') or self.curator() is None or self.composing:
                 return None
             target = self._target(a, ids)
             fields = self._fields(a)
@@ -278,6 +365,15 @@ class Canvas:
                 return None
             brief = pre['brief'] if pre and pre['n'] is None else self._new_brief(fields)
             sid = self.store.new_session(day, brief['title'])
+            if self.composing:
+                brief = dict(brief, mix={'title': None, 'said': text, 'composed': True})
+                a['reply'] = "On it. Give me a few minutes to dig; you'll see it come together here."
+                self._save(sid, 'prompt', text, a['reply'], brief, [])
+                # Nothing to note or tell until the songs arrive (they come with their story): not "writing" meanwhile.
+                self.store.update_session(sid, notes_state='none', story_state='none',
+                                          ytm_state='waiting', sp_state='waiting')  # nothing to save to them yet either
+                compose.queue(self.store, sid, text)
+                return sid
             got = pre['got'] if pre and pre['n'] is None else None
             if got:
                 order, brief = got
@@ -306,6 +402,12 @@ class Canvas:
         reshuffle = bool(a.get('reshuffle'))
         if reshuffle:
             new_brief['seed'] = E.normalize({'activity': new_brief['activity']})['seed']
+        if self.composing and (brief.get('mix') or {}).get('composed') and not a.get('ops') and \
+                (reshuffle or any(new_brief.get(k) != brief.get(k) for k in SHAPE)):
+            a['reply'] = ' '.join([a.get('reply') or '', 'Reworking it: a few minutes.']).strip()
+            self._save(sid, 'prompt', text, a['reply'], new_brief, tracks)
+            compose.queue(self.store, sid, text, instruction=text, keep=[t for t in tracks if t.get('pinned')])
+            return sid
         if reshuffle or any(new_brief.get(k) != brief.get(k) for k in SHAPE):
             got = pre['got'] if pre and pre['n'] == v['n'] and not a.get('ops') else None  # made from this very version
             if got:
@@ -329,6 +431,14 @@ class Canvas:
         b0 = E.tweak(v0['brief'], name)
         key = name if name != 'instrumental' or E.is_instrumental(b0) else 'vocals'
         asked = said or ('Bring the vocals back' if key == 'vocals' else E.TWEAKS[name])
+        if self.composing and (v0['brief'].get('mix') or {}).get('composed'):
+            with self.lock:
+                v = self.store.version(sid)
+                reply = 'Reworking it: a few minutes.'
+                self._save(sid, 'tweak', said or E.TWEAKS[name], reply, E.tweak(v['brief'], name), v['tracks'])
+                compose.queue(self.store, sid, said or E.TWEAKS[name], instruction=asked,
+                              keep=[t for t in v['tracks'] if t.get('pinned')])
+            return dict(self.session(sid), note=reply)
         got = self._curate(sid, s['day'], b0, asked, None if name == 'reshuffle' else v0['tracks'], instruction=asked,
                            deadline=time.time() + 90, rename=name == 'reshuffle') if v0['brief'].get('mix') else None
         with self.lock:
@@ -378,11 +488,34 @@ class Canvas:
             if not cur or not cur.get('parent'):
                 return self.session(sid)
             prev = self.store.version(sid, cur['parent'])
-            self.store.add_version(sid, 'undo', 'Undo', 'Back to how it was.', prev['brief'], prev['tracks'], parent=prev.get('parent') or 0)
+            n = self.store.add_version(sid, 'undo', 'Undo', 'Back to how it was.', prev['brief'], prev['tracks'], parent=prev.get('parent') or 0)
+            story = self.story_for(sid, prev['n'], prev['tracks'])
+            if story and story.get('composed'):  # a composed mix comes back with its own story, not the newer one's
+                self.restore_story(sid, n, story)
             self.store.mark_served(sid, prev['tracks'])
             self.store.update_session(sid, ytm_state='pending' if self.store.session(sid).get('ytm_state') != 'off' else 'off')
             self.store.enqueue(sid)
         return self.session(sid)
+
+    def story_for(self, sid, n, tracks):
+        """The composed story that tells these songs: the newest written for all of them (an edit keeps some of a
+        mix's songs; an undo brings an older set back), else the latest."""
+        ids = {t['id'] for t in tracks}
+        for k in range(n, 0, -1):
+            st = self.store.get(f'mix:{sid}:{k}')
+            if st and st.get('composed') and ids <= set(st.get('ids') or []):
+                return st
+        return self.store.get(f'mix:{sid}')
+
+    def restore_story(self, sid, n, story):
+        """A composed story becomes version n's (and the playlist's current) story."""
+        story = dict(story, n=n)
+        self.store.put(f'mix:{sid}:{n}', story)
+        self.store.put(f'mix:{sid}', story)
+        body = '\n\n'.join(x for x in (story.get('intro'), story.get('outro')) if x)
+        self.store.update_session(sid, notes_state='ready', story_state='ready',
+                                  story=json.dumps({'title': story.get('title'), 'body': body, 'intro': story.get('intro'),
+                                                    'outro': story.get('outro'), 'mix': True}))
 
     def delete(self, sid):
         with self.lock:
@@ -393,6 +526,8 @@ class Canvas:
         s = self.store.session(sid)
         if not s or s['deleted']:
             return None
+        if not self.store.version(sid)['tracks']:
+            return dict(self.session(sid), note='Nothing to save yet: the songs are still being chosen.')
         self.store.update_session(sid, **{k: 'pending' for k in ('ytm_state', 'sp_state') if s.get(k) not in (None, 'off')})
         self.store.enqueue(sid)
         # A resync makes no version, so the last change's reply would be stale: say what this one does instead.
@@ -405,6 +540,9 @@ class Canvas:
         self.store.set_lens(day, text or None)
         for s in self.store.sessions_on(day):
             if s['version'] > 0:
+                v = self.store.version(s['id'])
+                if v['brief'].get('mix') or not v['tracks']:
+                    continue  # a mix's story was written with its songs; a mix still being made has none yet
                 self.store.update_session(s['id'], story_state='pending')
                 self.store.enqueue(s['id'])
         return text or None
@@ -425,6 +563,23 @@ LENS_IDEAS = ['20th-century history', 'Something romantic', 'Pop culture of the 
               'Cinema', 'The Partition', 'The Jazz Age', 'Mughal India', 'The space race', 'Cricket', 'Food and how we eat',
               'The Cold War', "Bollywood's golden age", 'Architecture', 'Explorers', 'Women who changed music', 'Old Bangalore',
               'Science', 'Myths and epics', 'The 1970s', 'Cities', 'Rivers', 'Inventions', 'Love letters']
+
+
+def rules_of(b):
+    """The hard constraints in a brief, in words the composer is held to."""
+    rules = []
+    if E.is_instrumental(b):
+        rules.append('Instrumental only: no singing at all.')
+    if b.get('include_artists'):
+        rules.append('Include songs by: ' + ', '.join(b['include_artists']) + '.')
+    if b.get('exclude_artists'):
+        rules.append('Nothing by: ' + ', '.join(b['exclude_artists']) + '.')
+    if b.get('origins'):
+        rules.append('Only music from: ' + ', '.join(b['origins']) + '.')
+    for w in b.get('want') or []:
+        what = ' '.join(str(w[k]) for k in ('origin', 'world', 'artist') if w.get(k))
+        rules.append(f"At least {w['count']} {what} songs.")
+    return rules
 
 
 def lens_ideas(day, n=5):

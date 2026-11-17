@@ -11,6 +11,8 @@ Environment:
   TELLY_LLM_URL      Anthropic-shaped gateway (default: auth2api in-cluster)
   TELLY_LLM_KEY      its key (without one telly still works: rules read messages, no stories)
   TELLY_LLM_MODEL    default claude-sonnet-5
+  TELLY_COMPOSER_MODEL the model that researches and writes each mix (default claude-opus-5-5; empty turns it off)
+  TELLY_COMPOSER_EFFORT its effort (default xhigh: an equally good mix in 11 minutes where max took 29)
   TELLY_CURATOR_MODEL the model that chooses and orders songs and writes the story along them (default claude-fable-5)
   TELLY_LYRICS_URL   serve: LeZeppLean, for what's playing and its word-timed lyrics (unset: no lyrics)
   TELLY_LYRICS_TOKEN serve: its bearer token
@@ -23,6 +25,7 @@ import signal
 import sys
 
 from .api import AdminApp, Catalogs, PublicApp, serve
+from . import compose
 from .canvas import Canvas
 from .context import Place
 from .genius import Genius
@@ -55,7 +58,13 @@ def main():
     # The curator (choosing and ordering songs, and the story along them) runs on the model with the best ear.
     curator_llm = LLM(os.environ.get('TELLY_LLM_URL', 'http://auth2api.apps.svc.cluster.local:8317'), os.environ.get('TELLY_LLM_KEY', ''),
                       os.environ.get('TELLY_CURATOR_MODEL', 'claude-fable-5'))
-    canvas = Canvas(store, catalogs, place, llm, curator_llm)
+    # The composer (compose.py) makes each mix and its story the way a friend would: researched, then written in one
+    # voice. It takes minutes, so it works in the background (the worker); TELLY_COMPOSER_MODEL='' turns it off.
+    composer_model = os.environ.get('TELLY_COMPOSER_MODEL', 'claude-opus-5-5')
+    composer_llm = LLM(os.environ.get('TELLY_LLM_URL', 'http://auth2api.apps.svc.cluster.local:8317'), os.environ.get('TELLY_LLM_KEY', ''),
+                       composer_model) if composer_model else None
+    canvas = Canvas(store, catalogs, place, llm, curator_llm, composer_llm)
+    canvas.composer_effort = os.environ.get('TELLY_COMPOSER_EFFORT', compose.EFFORT)
     if a.role == 'serve':
         lyrics = Lyrics(os.environ.get('TELLY_LYRICS_URL', ''), os.environ.get('TELLY_LYRICS_TOKEN', ''))
         genius = Genius(store, llm, os.environ.get('TELLY_GENIUS_TOKEN', ''))
@@ -66,6 +75,7 @@ def main():
         worker = Worker(store, Services(vault), canvas)
         admin = AdminApp(os.environ.get('TELLY_ADMIN_TOKEN', ''), worker, vault, catalogs)
         worker.start()
+        compose.Worker(store, canvas).start()
         serve(admin, a.host, a.port or 8081, slots=8)
 
 

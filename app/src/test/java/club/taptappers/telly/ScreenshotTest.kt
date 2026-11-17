@@ -13,6 +13,7 @@ import androidx.compose.ui.unit.dp
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import club.taptappers.telly.data.Brief
 import club.taptappers.telly.data.CatalogInfo
+import club.taptappers.telly.data.Composing
 import club.taptappers.telly.data.Day
 import club.taptappers.telly.data.LibraryDay
 import club.taptappers.telly.data.LineNote
@@ -124,6 +125,26 @@ class ScreenshotTest {
             run.copy(notesState = "writing")) { haze ->
             PlaylistScreen(run.copy(brief = Brief(instrumental = true), notesState = "writing"), null, false, emptySet(), haze, noop, 96.dp)
         }
+    }
+
+    @Test
+    fun playlist_composing() = shoot("15-playlist-composing") {
+        WithComposer("Change this playlist…", null) { haze -> PlaylistScreen(composing, null, false, emptySet(), haze, noop, 96.dp) }
+    }
+
+    @Test
+    fun playlist_composed() = shoot("16-playlist-composed") {
+        WithComposer("Change this playlist…", null) { haze -> PlaylistScreen(cafe, null, false, emptySet(), haze, noop, 96.dp) }
+    }
+
+    @Test
+    fun playlist_compose_failed() = shoot("17-playlist-compose-failed") {
+        WithComposer("Change this playlist…", null) { haze -> PlaylistScreen(failed, null, false, emptySet(), haze, noop, 96.dp) }
+    }
+
+    @Test
+    fun today_composing() = shoot("18-today-composing") {
+        Canvas(Day("2026-11-17", "Tuesday, 17 November", true, "26°, partly cloudy", lens = "Women who changed music", sessions = listOf(composing, run)))
     }
 
     @Test
@@ -242,6 +263,42 @@ class ScreenshotTest {
             log = listOf(LogEntry(0.0, "prompt", "going for a run at 6:30 pm, about 40 minutes", "Set up a 40-minute run that builds to a long peak."),
                 LogEntry(0.0, "prompt", "add some Bengali songs in the middle", "Added a few Bengali songs into the middle of your run.")),
         )
+
+        /** A composed mix: one story, an opening above the songs, a paragraph each, a landing. */
+        val cafe = Session(
+            id = "5ca7e00011", day = "2026-11-17", title = "10 am cafe walk", activity = "walk", start = "10:00", startLabel = "10 am",
+            minutes = 15, durationMin = 7, count = 3, summary = "\u201cThe Traffic Wrote the Words\u201d",
+            tracks = listOf(
+                tr(1, "Chelsea Morning", "Joni Mitchell", "new_known", "Joni wrote this in her room in New York's Chelsea: \u201cthe first thing that I " +
+                    "heard was a song outside my window, and the traffic wrote the words.\u201d Bangalore's traffic has more to say. Halfway " +
+                    "through, listen for the pigeons and the papers \u201cwaiting to blow away\u201d."),
+                tr(2, "Doctor Who (Original Theme)", "BBC Radiophonic Workshop", "new_frontier", "For the loudest stretch of road. Delia " +
+                    "Derbyshire built this at the BBC one note at a time, splicing tape of a single plucked string, hiss, and the test tones " +
+                    "engineers used to calibrate rooms. The composer heard it and asked \u201cDid I write that?\u201d She said \u201cMost of it.\u201d"),
+                tr(3, "Tom's Diner (A Cappella)", "Suzanne Vega", "new_known", "Time this for when you sit down. She's in a diner in the " +
+                    "morning doing exactly what you came out to do, \u201cpretending not to see them\u201d while seeing everything. Years " +
+                    "later the MP3 was tested on this recording: that warm, bare voice was the hardest thing to squeeze."),
+            ),
+            ytm = Remote("synced", "https://music.youtube.com/playlist?list=PLy", play = "https://music.youtube.com/watch?v=y&list=PLy"),
+            spotify = Remote("synced", "https://open.spotify.com/playlist/y"), notesState = "ready",
+            story = Story("ready", "The Traffic Wrote the Words", "",
+                intro = "Before you press play, give the road one minute with nothing in your ears. Horns count.\n\n" +
+                    "Every woman on this walk changed music by noticing something everyone else walked past.",
+                outro = "She finishes her coffee and has a train to catch. You don't."),
+            weather = "26°, partly cloudy",
+            log = listOf(LogEntry(0.0, "prompt", "15 mins morning walk to a cafe on busy roads, trying to observe the small things around",
+                "On it. Give me a few minutes to dig; you'll see it come together here."),
+                LogEntry(0.0, "compose", null, "Here it is: \u201cThe Traffic Wrote the Words\u201d, 3 songs, 7 minutes.")),
+        )
+
+        /** The same moment three and a half minutes into being made. */
+        val composing = cafe.copy(id = "5ca7e00012", tracks = emptyList(), count = 0, durationMin = 0, summary = "", story = Story("pending"),
+            notesState = "none", ytm = Remote("waiting"), spotify = Remote("waiting"), log = cafe.log.take(1),
+            composing = Composing("working", listOf("Looking through your history for Joni Mitchell", "Reading about Delia Derbyshire",
+                "Reading the lyrics of Tom's Diner", "Searching r/LetsTalkMusic for \u201cwalking\u201d"),
+                since = System.currentTimeMillis() / 1000.0 - 210))
+
+        val failed = composing.copy(composing = Composing("failed", error = "The language model is busy right now. Try again in a few minutes."))
 
         val walk = run.copy(id = "77aa001122", title = "post-dinner walk", activity = "walk", start = "21:30", startLabel = "9:30 pm",
             minutes = 30, durationMin = 31, count = 6, summary = "Mostly familiar, 2 new. It winds down.", weather = "22°, clear",
