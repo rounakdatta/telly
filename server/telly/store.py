@@ -90,6 +90,11 @@ class Store:
             r = c.execute('SELECT v FROM kv WHERE k=?', (k,)).fetchone()
         return json.loads(r['v']) if r else default
 
+    def keys(self, prefix):
+        """Every key starting with `prefix`."""
+        with self.db() as c:
+            return [r['k'] for r in c.execute('SELECT k FROM kv WHERE k >= ? AND k < ?', (prefix, prefix + '\uffff'))]
+
     def put(self, k, v):
         with self.db() as c:
             if v is None:

@@ -176,6 +176,8 @@ class PublicApp(Base):
             ('POST', r'/api/session/([0-9a-f]{10})/edit', self.edit, True, 'change'),
             ('POST', r'/api/session/([0-9a-f]{10})/undo', self.undo, True, 'change'),
             ('POST', r'/api/session/([0-9a-f]{10})/sync', self.resync, True, 'change'),
+            ('POST', r'/api/session/([0-9a-f]{10})/compose', self.recompose, True, 'change'),
+            ('POST', r'/api/session/([0-9a-f]{10})/quick', self.quick, True, 'change'),
             ('DELETE', r'/api/session/([0-9a-f]{10})', self.delete, True, 'change'),
             ('GET', r'/api/library', self.library, True, None),
             ('GET', r'/api/now', self.now, True, 'now'),
@@ -261,6 +263,17 @@ class PublicApp(Base):
     def resync(self, m, q, body):
         s = self.canvas.resync(m.group(1))
         return (200, s) if s else (404, {'error': 'no such playlist'})
+
+    def recompose(self, m, q, body):
+        """Make a mix again (after it failed, or just because)."""
+        s = self.canvas.recompose(m.group(1))
+        return (200, s) if s else (404, {'error': 'no such playlist, or no composer'})
+
+    def quick(self, m, q, body):
+        """The engine's quick list instead, for when he can't wait for the mix."""
+        if not self.canvas.session(m.group(1)):
+            return 404, {'error': 'no such playlist'}
+        return 200, self.canvas.quick(m.group(1))
 
     def delete(self, m, q, body):
         if not self.canvas.session(m.group(1)):

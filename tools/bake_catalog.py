@@ -8,7 +8,8 @@ folder (Spotify "fans also like" artists, Strava-matched plays, the full play hi
   tracks      songs the listener knows
   candidates  new songs lined up for them (top tracks of known and adjacent artists)
   world_mix   how their nine worlds mix by hour of day, during runs/walks/rides, and over the last two years
-  meta        build time, home, and the short "about the listener" text the stories are written for
+  meta        build time, home, the short "about the listener" text the stories are written for, his most
+              played artists, and the mixes he loved (the composer's standard)
 
 The file holds personal listening history: it goes to the server's private volume (PUT /admin/catalog), never into
 this repository or an image.
@@ -28,6 +29,10 @@ TRACK_COLS = ['id', 'title', 'artist', 'artist_key', 'spotify_uri', 'ytm_vid', '
               'acousticness', 'instrumentalness', 'speechiness']
 CAND_COLS = ['id', 'title', 'artist', 'artist_key', 'spotify_uri', 'duration_ms', 'world', 'origin', 'kind', 'playcount', 'monthly',
              'adjacency', 'artist_aff', 'tempo', 'energy', 'valence', 'danceability', 'acousticness', 'instrumentalness', 'speechiness']
+# Label channels that YouTube credits as the artist of film songs: not anyone he listens *to*.
+LABELS = {'t-series', 'zee music company', 'release', 'sony music india', 'saregama', 'saregama music', 'tips official', 'yrf',
+          'eros now music', 'speed records', 'times music', 'shemaroo', 'venus', 'universal music india', 'desi music factory',
+          'white hill music', 'tips music', 'saregama bengali', 'sony music south'}
 IST = dt.timezone(dt.timedelta(hours=5, minutes=30))
 
 
@@ -35,6 +40,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--taste', default=os.path.expanduser('~/personal/music-taste'))
     ap.add_argument('--out', default='catalog.db')
+    ap.add_argument('--gold', default=os.path.expanduser('~/personal/telly-bench/gold'),
+                    help='mixes he loved (markdown, one per file): the standard the composer is shown')
     a = ap.parse_args()
     engine = os.path.join(a.taste, 'engine')
     data = os.path.join(a.taste, 'data')
@@ -100,6 +107,18 @@ def main():
     meta = {'built_at': str(int(time.time())), 'about': stories.ABOUT.replace('\n', ' '), 'home_name': 'Bengaluru',
             'home_lat': '12.9716', 'home_lon': '77.5946', 'tz_minutes': '330',
             'tracks': str(len(known)), 'candidates': str(len(rows))}
+    # Who he plays most, ever and this past year (by the first-named artist), for the composer's brief.
+    ever, year = Counter(), Counter()
+    for t in known:
+        lead = (t['artist'] or '').split(',')[0].strip()
+        if lead.lower() in LABELS or lead.endswith(' - Topic'):
+            continue  # a YouTube label channel, not an artist
+        ever[lead] += t['plays'] or 0
+        year[lead] += t.get('plays_365d') or 0
+    meta['top_ever'] = json.dumps([x for x, _ in ever.most_common(25)], ensure_ascii=False)
+    meta['top_year'] = json.dumps([x for x, n in year.most_common(20) if n], ensure_ascii=False)
+    if os.path.isdir(a.gold):
+        meta['examples'] = '\n\n'.join(open(os.path.join(a.gold, f)).read().strip() for f in sorted(os.listdir(a.gold)) if f.endswith('.md'))
     out.executemany('INSERT INTO meta VALUES (?,?)', meta.items())
     out.commit()
     out.execute('VACUUM')

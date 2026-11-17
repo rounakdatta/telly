@@ -39,6 +39,8 @@ data class Session(
     val spotify: Remote = Remote(),
     val story: Story = Story(),
     @SerialName("notes_state") val notesState: String = "none",
+    /** A mix being made (or remade) in the background: minutes of research, its steps shown as they happen. */
+    val composing: Composing? = null,
     val brief: Brief = Brief(),
     val weather: String? = null,
     val log: List<LogEntry> = emptyList(),
@@ -48,13 +50,17 @@ data class Session(
     /** The title as shown: the planner writes them lowercase ("post-dinner walk"); a title starts with a capital. */
     val name: String get() = title.replaceFirstChar { it.uppercaseChar() }
 
-    /** Still settling: a playlist being written to a service, or a story being written. */
+    /** A mix written as one story (an opening, a paragraph per song, a landing) rather than a note per song. */
+    val composed: Boolean get() = story.intro != null
+
+    /** Still settling: a mix being made, a playlist being written to a service, or a story being written. */
     val settling: Boolean
-        get() = ytm.state in BUSY || spotify.state in BUSY || story.state in WRITING || notesState in WRITING
+        get() = composing?.active == true || ytm.state in BUSY || spotify.state in BUSY || story.state in WRITING || notesState in WRITING
 
     /** The one thing still happening in the background, in words, or null when it has all settled. */
     val inProgress: String?
         get() = when {
+            composing?.active == true -> composing.progress.lastOrNull() ?: "Making your mix…"
             ytm.state in BUSY -> "Saving to YouTube Music…"
             spotify.state in BUSY -> "Saving to Spotify…"
             notesState in WRITING -> "Writing a note for each song…"
@@ -117,7 +123,24 @@ data class Story(
     val body: String? = null,
     val deeper: String? = null,
     @SerialName("deeper_checked") val deeperChecked: Boolean = false,
+    /** A composed mix's story: what to read before pressing play, and the line it ends on. */
+    val intro: String? = null,
+    val outro: String? = null,
 )
+
+@Serializable
+data class Composing(
+    /** queued, working, or failed (then [error] says why, in words). */
+    val state: String = "queued",
+    /** The last few things it did ("Reading about Delia Derbyshire"), newest last. */
+    val progress: List<String> = emptyList(),
+    /** When it started (or was asked for), in epoch seconds. */
+    val since: Double? = null,
+    val error: String? = null,
+) {
+    val active: Boolean get() = state == "queued" || state == "working"
+    val failed: Boolean get() = state == "failed"
+}
 
 @Serializable
 data class LogEntry(val at: Double = 0.0, val source: String = "", val said: String? = null, val reply: String? = null)

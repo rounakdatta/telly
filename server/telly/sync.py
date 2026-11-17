@@ -126,6 +126,8 @@ class Worker(threading.Thread):
         v = self.store.version(sid)
         if not v:
             return
+        if not v['tracks']:
+            return  # a mix still being composed: it syncs when its songs arrive
         y, sp = self.services.ytm(), self.services.spotify()
         if y:
             self._ytm(y, s, v)
@@ -287,6 +289,10 @@ class Worker(threading.Thread):
                 done = True
                 return
             last = self.store.get(f'mix:{sid}')
+            if last and last.get('composed'):
+                self.store.put(key, dict(last, n=v['n']))  # composed with its songs; never rewritten after the fact
+                done = True
+                return
             if last and last.get('ids') and sorted(last['ids']) == sorted(t['id'] for t in v['tracks']):
                 self.store.put(key, dict(last, n=v['n']))  # the same songs: the same story
                 done = True

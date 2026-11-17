@@ -133,12 +133,25 @@ fun SessionCard(s: Session, onOpen: () -> Unit, onPlay: (String) -> Unit, modifi
         Spacer(Modifier.width(14.dp))
         Column(Modifier.weight(1f)) {
             Text(s.name, style = T.headline, color = C.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            // A mix still being made has no length or songs yet: the card says what it is doing instead.
+            val c = s.composing
             Text(
-                "${s.durationMin} min · ${s.count} songs",
+                when {
+                    c?.failed == true && s.tracks.isEmpty() -> "Couldn't finish this mix"
+                    c?.active == true && s.tracks.isEmpty() -> "Making your mix · ${s.minutes} min"
+                    else -> "${s.durationMin} min · ${s.count} songs"
+                },
                 style = T.tabular, color = C.text2, maxLines = 1, overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.padding(top = 2.dp),
             )
-            Text(s.summary, style = T.caption, color = C.text3, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 4.dp))
+            val line = when {
+                c?.failed == true -> "Open it to try again."
+                c?.active == true -> c.progress.lastOrNull() ?: "Thinking about the moment first…"
+                else -> s.summary
+            }
+            if (line.isNotBlank()) {
+                Text(line, style = T.caption, color = C.text3, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 4.dp))
+            }
         }
         Spacer(Modifier.width(10.dp))
         PlayCircle(s.ytm.play ?: s.ytm.url, settling = s.ytm.state in setOf("pending", "syncing"), onPlay = onPlay)
