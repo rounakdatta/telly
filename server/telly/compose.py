@@ -481,6 +481,12 @@ class Research:
         return '\n\n'.join(x for x in lines if x)
 
 
+def _unreadable(e):
+    """A refusal because the history holds something another account encrypted (thinking signatures, web results)."""
+    msg = str(e)
+    return 'HTTP 400' in msg and any(w in msg for w in ('encrypted', 'signature', 'thinking'))
+
+
 def _say(name, args):
     """What a tool call looks like in the progress line he sees while the mix is being made."""
     a = args or {}
@@ -567,7 +573,7 @@ class Composer:
 
     def _loop(self, system, user, minutes, progress, deadline, usage):
         messages = [{'role': 'user', 'content': user}]
-        research_log, said, nudged = [], [], 0
+        research_log, said, nudged, fresh_starts = [], [], 0, 0
         tools = TOOLS + SERVER_TOOLS
         pool = concurrent.futures.ThreadPoolExecutor(max_workers=6)
         try:
@@ -578,10 +584,25 @@ class Composer:
                     raise ComposeError('ran out of time')
                 # Cached as it grows (the request-level breakpoint moves to the end each turn): a mix is a few dozen
                 # turns over the same long conversation, and without it every turn paid for all of it again.
-                msg = self.llm.stream({'max_tokens': 64000, 'system': [{'type': 'text', 'text': system, 'cache_control': {'type': 'ephemeral'}}],
-                                       'messages': messages, 'tools': tools, 'thinking': {'type': 'adaptive'},
-                                       'output_config': {'effort': self.effort}, 'cache_control': {'type': 'ephemeral'}},
-                                      betas=BETAS, retries=4, wait=15)  # a busy minute shouldn't sink a half-made mix
+                try:
+                    msg = self.llm.stream({'max_tokens': 64000, 'system': [{'type': 'text', 'text': system, 'cache_control': {'type': 'ephemeral'}}],
+                                           'messages': messages, 'tools': tools, 'thinking': {'type': 'adaptive'},
+                                           'output_config': {'effort': self.effort}, 'cache_control': {'type': 'ephemeral'}},
+                                          betas=BETAS, retries=4, wait=15)  # a busy minute shouldn't sink a half-made mix
+                except LLMError as e:
+                    # The gateway serves from more than one Claude account and changes account every so often; what one
+                    # account encrypted (its thinking, its web search results) another can't read, so a mix that spans
+                    # the change is refused. Start the conversation again on the new account, with everything found
+                    # so far as plain text, and carry on.
+                    if fresh_starts < 4 and _unreadable(e):
+                        fresh_starts += 1
+                        log.info('compose: the gateway changed account mid-mix; starting afresh from the research')
+                        messages = [{'role': 'user', 'content': f'{user}\n\n## What you have found so far\n\n{self._digest(research_log)}\n\n'
+                                                                'Your earlier working was lost to a technical hiccup, not '
+                                                                'anything you did. Carry on from what you found: anything '
+                                                                'listed under find_recording can be used as it is.'}]
+                        continue
+                    raise
                 for k, v in (msg.get('usage') or {}).items():
                     if isinstance(v, (int, float)):
                         usage[k] = usage.get(k, 0) + v
