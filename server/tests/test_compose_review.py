@@ -114,6 +114,25 @@ class ReviewFindingsTest(ComposingBase):
         self.assertIsNotNone(self.store.get('mix:abc'))
 
 
+class AccountSwitchTest(ComposingBase):
+    def test_a_mix_spanning_a_change_of_gateway_account_starts_afresh_from_its_research(self):
+        refused = LLMError('HTTP 400: b\'{"type":"error","error":{"type":"invalid_request_error","message":"messages.5.content.0: '
+                           'Invalid `encrypted_content`"}}\'')
+        llm = Script(RESEARCH, refused, turn(deliver('d1', GOOD)))
+        c = C.Composer(llm, C.Research(self.cat, self.store))
+        res = c.make('For: a walk', 5, edit=False)
+        self.assertEqual([s['apple_id'] for s in res['mix']['songs']], [101, 102])
+        fresh = llm.bodies[2]['messages']
+        self.assertEqual(len(fresh), 1)  # nothing another account encrypted is sent again
+        self.assertIn('What you have found so far', fresh[0]['content'])
+        self.assertIn('apple_id 101', fresh[0]['content'])  # its research survives, songs found included
+
+    def test_other_refusals_still_fail_the_mix(self):
+        llm = Script(RESEARCH, LLMError('HTTP 400: invalid_request_error: max_tokens too large'))
+        with self.assertRaises(LLMError):
+            C.Composer(llm, C.Research(self.cat, self.store)).make('For: a walk', 5, edit=False)
+
+
 class StreamTest(Base):
     @staticmethod
     def lines(*events):
