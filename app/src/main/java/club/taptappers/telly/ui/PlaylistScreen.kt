@@ -390,7 +390,7 @@ private fun ComposingCard(c: Composing, hasSongs: Boolean, working: String?, act
 @Composable
 private fun LinerNotes(s: Session) {
     val st = s.story
-    if (st.state == "none" || s.composed) return
+    if (st.state == "none" || s.composed || (s.composing != null && s.tracks.isEmpty())) return
     Column(Modifier.fillMaxWidth().padding(horizontal = 24.dp).padding(top = 34.dp)) {
         Text("Liner notes", style = T.small, color = C.text3)
         Spacer(Modifier.height(10.dp))

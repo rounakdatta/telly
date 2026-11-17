@@ -365,6 +365,8 @@ class Canvas:
                 brief = dict(brief, mix={'title': None, 'said': text, 'composed': True})
                 a['reply'] = "On it. Give me a few minutes to dig; you'll see it come together here."
                 self._save(sid, 'prompt', text, a['reply'], brief, [])
+                # Nothing to note or tell until the songs arrive (they come with their story): not "writing" meanwhile.
+                self.store.update_session(sid, notes_state='none', story_state='none')
                 compose.queue(self.store, sid, text)
                 return sid
             got = pre['got'] if pre and pre['n'] is None else None

@@ -185,6 +185,8 @@ class ComposingTest(Base):
         waiting = self.canvas.session(sid)
         self.assertEqual(waiting['tracks'], [])
         self.assertEqual(waiting['composing']['state'], 'queued')
+        # nothing claims to be writing notes for songs that haven't arrived (the app would wait on it for ever)
+        self.assertEqual((waiting['notes_state'], waiting['story']['state']), ('none', 'none'))
 
         C.Worker(self.store, self.canvas).make(sid)
         s = self.canvas.session(sid)
