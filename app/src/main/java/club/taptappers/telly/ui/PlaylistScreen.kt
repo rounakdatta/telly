@@ -122,8 +122,11 @@ fun PlaylistScreen(s: Session, working: String?, updating: Boolean, fresh: Set<S
             contentPadding = PaddingValues(top = top + 60.dp, bottom = bottomSpace + 28.dp),
         ) {
             item(key = "hero") { Hero(s) }
-            item(key = "actions") { PlayRow(s, working, actions) }
-            item(key = "tweaks") { Tweaks(s, working, actions) }
+            // Until the songs arrive there is nothing to play, save or reshape: no buttons for what doesn't exist yet.
+            if (s.tracks.isNotEmpty()) {
+                item(key = "actions") { PlayRow(s, working, actions) }
+                item(key = "tweaks") { Tweaks(s, working, actions) }
+            }
             item(key = "progress") {
                 Box(Modifier.fillMaxWidth().height(2.dp).padding(horizontal = 20.dp)) {
                     if (updating) LinearProgressIndicator(Modifier.fillMaxWidth(), color = accent, trackColor = Color.Transparent)

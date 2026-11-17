@@ -187,6 +187,7 @@ class ComposingTest(Base):
         self.assertEqual(waiting['composing']['state'], 'queued')
         # nothing claims to be writing notes for songs that haven't arrived (the app would wait on it for ever)
         self.assertEqual((waiting['notes_state'], waiting['story']['state']), ('none', 'none'))
+        self.assertEqual((waiting['ytm']['state'], waiting['spotify']['state']), ('waiting', 'waiting'))
 
         C.Worker(self.store, self.canvas).make(sid)
         s = self.canvas.session(sid)
@@ -198,6 +199,7 @@ class ComposingTest(Base):
         self.assertEqual(s['story']['intro'], 'Give the road a minute.')
         self.assertEqual(s['story']['outro'], 'You don’t have a train to catch.')
         self.assertIn('Here it is', s['log'][-1]['reply'])
+        self.assertEqual((s['ytm']['state'], s['spotify']['state']), ('pending', 'pending'))  # now there is something to save
         asked = llm.bodies[0]['messages'][0]['content']
         self.assertIn('His words: "a walk to the cafe, noticing small things"', asked)
         self.assertIn('Length: about 5 minutes.', asked)

@@ -153,7 +153,9 @@ fun SessionCard(s: Session, onOpen: () -> Unit, onPlay: (String) -> Unit, modifi
                 Text(line, style = T.caption, color = C.text3, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 4.dp))
             }
         }
-        Spacer(Modifier.width(10.dp))
-        PlayCircle(s.ytm.play ?: s.ytm.url, settling = s.ytm.state in setOf("pending", "syncing"), onPlay = onPlay)
+        if (s.tracks.isNotEmpty()) {  // a mix still being made has nothing to play yet
+            Spacer(Modifier.width(10.dp))
+            PlayCircle(s.ytm.play ?: s.ytm.url, settling = s.ytm.state in setOf("pending", "syncing"), onPlay = onPlay)
+        }
     }
 }

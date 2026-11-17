@@ -293,7 +293,7 @@ class ScreenshotTest {
 
         /** The same moment three and a half minutes into being made. */
         val composing = cafe.copy(id = "5ca7e00012", tracks = emptyList(), count = 0, durationMin = 0, summary = "", story = Story("pending"),
-            notesState = "none", ytm = Remote("pending"), spotify = Remote("pending"), log = cafe.log.take(1),
+            notesState = "none", ytm = Remote("waiting"), spotify = Remote("waiting"), log = cafe.log.take(1),
             composing = Composing("working", listOf("Looking through your history for Joni Mitchell", "Reading about Delia Derbyshire",
                 "Reading the lyrics of Tom's Diner", "Searching r/LetsTalkMusic for \u201cwalking\u201d"),
                 since = System.currentTimeMillis() / 1000.0 - 210))

@@ -87,8 +87,10 @@ class Canvas:
             self.store.put(f'mix:{sid}:{n}', story)
             self.store.put(f'mix:{sid}', story)
             body = '\n\n'.join(x for x in (story['intro'], story['outro']) if x)
+            cur = self.store.session(sid)
             self.store.update_session(sid, notes_state='ready', story_state='ready',
-                                      ytm_state='pending' if self.store.session(sid).get('ytm_state') != 'off' else 'off',
+                                      ytm_state='pending' if cur.get('ytm_state') != 'off' else 'off',
+                                      sp_state='pending' if cur.get('sp_state') != 'off' else 'off',
                                       story=json.dumps({'title': title, 'body': body, 'intro': story['intro'], 'outro': story['outro'], 'mix': True}))
             self.store.enqueue(sid)
         return n
@@ -366,7 +368,8 @@ class Canvas:
                 a['reply'] = "On it. Give me a few minutes to dig; you'll see it come together here."
                 self._save(sid, 'prompt', text, a['reply'], brief, [])
                 # Nothing to note or tell until the songs arrive (they come with their story): not "writing" meanwhile.
-                self.store.update_session(sid, notes_state='none', story_state='none')
+                self.store.update_session(sid, notes_state='none', story_state='none',
+                                          ytm_state='waiting', sp_state='waiting')  # nothing to save to them yet either
                 compose.queue(self.store, sid, text)
                 return sid
             got = pre['got'] if pre and pre['n'] is None else None
